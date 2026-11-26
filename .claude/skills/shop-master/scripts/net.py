@@ -8,8 +8,8 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
-# Seconds between two requests to one host. The platforms throttle bursts, and a gather sends dozens of requests.
-GAP = 0.2
+# Seconds between two requests to one host. The platforms throttle bursts, and a gather sends dozens of requests; at 0.2 Glovo answered some with 429.
+GAP = 0.35
 RETRY_ON = (429, 502, 503, 504)
 
 _next_slot = {}

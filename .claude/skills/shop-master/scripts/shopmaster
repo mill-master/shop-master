@@ -83,6 +83,11 @@ def gather(args):
     food = run["food"]
     for spec in args.want:
         key, quantity, queries = parse_want(spec)
+        if run["wants"].get(key, {}).get("queries", queries) != queries:
+            # A want searched afresh loses what the old queries found, and the picks made among it.
+            for ref, store in run["stores"].items():
+                store["offers"].pop(key, None)
+                run["picks"].pop(f"{ref}.{key}", None)
         run["wants"][key] = {"qty": quantity, "queries": queries}
     if not run["wants"]:
         sys.exit("Nothing wanted: pass at least one --want.")
@@ -126,7 +131,7 @@ def gather(args):
         if error:
             problems.append(f"{platform}: reading store {key!r} failed ({error})")
             continue
-        number = 1 + sum(1 for s in run["stores"].values() if s["platform"] == platform)
+        number = 1 + max((int(ref[1:]) for ref in run["stores"] if ref[0] == platform[0]), default=0)
         run["stores"][f"{platform[0]}{number}"] = {"platform": platform, "key": key, **record, "offers": {}, "failed": {}}
 
     def fill(pair):

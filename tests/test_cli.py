@@ -144,5 +144,64 @@ class Cli(unittest.TestCase):
         self.assertIn("(delivery price only)", report)
 
 
+def shop(shelves):
+    """A platform with fixed shelves: {store: {query: [(name, price), ...]}}."""
+
+    def discover(query, lat, lon, food):
+        return [{"store": key, "name": key.title(), "open": True, "price": price}
+                for key, shelf in shelves.items() for _, price in shelf.get(query, [])]
+
+    def read(key, lat, lon):
+        record = store("shop", key.title(), {})
+        return {field: value for field, value in record.items() if field not in ("platform", "key", "offers", "failed")}
+
+    def shelf(record, query, lat, lon):
+        return [offer(name, price) for name, price in shelves[record["key"]].get(query, [])]
+
+    return SimpleNamespace(discover=discover, store=read, shelf=shelf)
+
+
+class Gather(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        cli.RUN_FILE = Path(folder.name) / "run.json"
+        cli.POINT_FILE = Path(folder.name) / "point.json"
+        cli.save(cli.POINT_FILE, {"lat": 41.69, "lon": 44.8, "label": "home"})
+        cli.PLATFORMS = {"shop": shop({
+            "full": {"milk": [("Milk 1L", 550)], "eggs": [("Eggs 10", 600)], "kvertskhi": [("Eggs 15", 850)]},
+            "half": {"milk": [("Milk 1L", 500)]},
+        })}
+
+    def gather(self, *wants, **options):
+        out = io.StringIO()
+        defaults = {"want": list(wants), "food": False, "store": [], "per_platform": 1, "platform": None, "closed": False, "add": False}
+        with contextlib.redirect_stdout(out):
+            cli.gather(SimpleNamespace(**{**defaults, **options}))
+        return out.getvalue(), cli.load(cli.RUN_FILE, "run")
+
+    def test_the_store_matching_most_of_the_list_is_read_and_the_next_is_named(self):
+        report, run = self.gather("milk", "eggs")
+        self.assertEqual([s["key"] for s in run["stores"].values()], ["full"])
+        self.assertEqual([o["name"] for o in run["stores"]["s1"]["offers"]["eggs"]], ["Eggs 10"])
+        self.assertIn("shop also matched: shop:half Half (1/2)", report)
+
+    def test_adding_a_named_store_keeps_the_run_and_numbers_past_a_dropped_one(self):
+        self.gather("milk", "eggs", per_platform=2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.drop(SimpleNamespace(refs=["s1"]))
+        _, run = self.gather(add=True, store=["shop:full"])
+        self.assertEqual(list(run["stores"]), ["s2", "s3"])
+        self.assertEqual(run["stores"]["s2"]["offers"]["eggs"], [])
+
+    def test_searching_a_want_afresh_replaces_its_candidates_and_forgets_its_pick(self):
+        self.gather("milk", "eggs")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.pick(SimpleNamespace(picks=["s1.eggs=1x2", "s1.milk=1"]))
+        _, run = self.gather("eggs=kvertskhi", add=True)
+        self.assertEqual([o["name"] for o in run["stores"]["s1"]["offers"]["eggs"]], ["Eggs 15"])
+        self.assertEqual(run["picks"], {"s1.milk": {"n": 1}})
+
+
 if __name__ == "__main__":
     unittest.main()
