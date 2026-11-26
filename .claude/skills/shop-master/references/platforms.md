@@ -71,7 +71,7 @@ Provider pages live at `food.bolt.eu/en-US/{city_id}/p/{slug}`.
 
 ## Signed-in access
 
-None of it has been exercised. What the web clients show:
+None of it has been exercised. The shopper signs in to each platform's site in a Chrome profile of its own, kept at `$HOME/.local/share/shop-master/browser` apart from their everyday browser, so that a later version can reuse those sessions. What the web clients show:
 
 - **Wolt**: the checkout call accepts a bearer token, and the dynamic store call has subscription fields (`delivery_pricing_with_subscription`, `subscription.active_plan_id`) that are empty for an anonymous visitor. Stores in Tbilisi carried `show_wolt_plus: false`. Per the wolt-mcp source, a basket is written with `POST /order-xp/v1/baskets` (a whole-basket replace keyed by store id) and the access token is refreshed at `authentication.wolt.com/v1/wauth2/access_token`.
 - **Glovo**: the web bundle names `v1/authenticated/customers/{id}/baskets`, `v2/baskets/stores/{id}?storeAddressId=` and guest equivalents under `v2/guest/customers/{id}/`. Stores report `primeAvailable: true`.

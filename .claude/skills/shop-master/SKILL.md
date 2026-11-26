@@ -1,6 +1,6 @@
 ---
 name: shop-master
-description: Someone in Tbilisi wants groceries, pharmacy or household items, or a restaurant dish delivered and asks where to order: prices the whole list on Wolt, Glovo and Bolt Food with delivery, service and small-order fees included, and names the store, or the split between stores, that costs least. Triggers: shopping list, order groceries, cheapest delivery, which app is cheaper, compare Wolt Glovo Bolt, small order fee, minimum order, free delivery threshold, best price for a dish.
+description: "Someone in Tbilisi wants groceries, pharmacy or household items, or a restaurant dish delivered and asks where to order: prices the whole list on Wolt, Glovo and Bolt Food with delivery, service and small-order fees included, and names the store, or the split between stores, that costs least. Triggers: shopping list, order groceries, cheapest delivery, which app is cheaper, compare Wolt Glovo Bolt, small order fee, minimum order, free delivery threshold, best price for a dish."
 ---
 
 # Shop Master
