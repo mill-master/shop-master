@@ -19,24 +19,22 @@ def fee_amount(segments, subtotal):
     return 0
 
 
-def fee_lines(store, subtotal, new_customer=False):
+def fee_lines(store, subtotal):
     """Non-zero fees of one basket as (label, amount) pairs."""
     lines = []
     for fee in store["fees"]:
-        if fee.get("new_customer") and not new_customer:
-            continue
         amount = fee_amount(fee["segments"], subtotal)
         if amount:
             lines.append((fee["label"], amount))
     return lines
 
 
-def next_threshold(store, subtotal, new_customer=False):
+def next_threshold(store, subtotal):
     """The nearest larger subtotal at which this basket's fees fall, as (extra_goods, fees_saved), or None.
 
     When the two numbers are equal the fee was buying nothing: goods worth that much cost no more than paying it.
     """
-    now = sum(amount for _, amount in fee_lines(store, subtotal, new_customer))
+    now = sum(amount for _, amount in fee_lines(store, subtotal))
     marks = set()
     for fee in store["fees"]:
         for low, high, _, _ in fee["segments"]:
@@ -44,13 +42,13 @@ def next_threshold(store, subtotal, new_customer=False):
             if high is not None:
                 marks.add(high)
     for mark in sorted(m for m in marks if m > subtotal):
-        saved = now - sum(amount for _, amount in fee_lines(store, mark, new_customer))
+        saved = now - sum(amount for _, amount in fee_lines(store, mark))
         if saved > 0:
             return mark - subtotal, saved
     return None
 
 
-def _best_division(group, wants, is_new, memo):
+def _best_division(group, wants, memo):
     """Cheapest division of `wants` among the stores of `group` that leaves no store empty."""
     fixed = [0] * len(group)
     assigned = {}
@@ -84,7 +82,7 @@ def _best_division(group, wants, is_new, memo):
     def fees(i, subtotal):
         key = (group[i]["ref"], subtotal)
         if key not in memo:
-            memo[key] = sum(amount for _, amount in fee_lines(group[i], subtotal, is_new(group[i])))
+            memo[key] = sum(amount for _, amount in fee_lines(group[i], subtotal))
         return memo[key]
 
     best_cost = None
@@ -115,23 +113,19 @@ def _best_division(group, wants, is_new, memo):
     return best_cost, assigned, missing, approximate
 
 
-def plans(wants, stores, max_stores=2, new_customers=()):
+def plans(wants, stores, max_stores=2):
     """Every worthwhile way to buy `wants`, best first.
 
     wants: the want keys.
-    stores: [{"ref", "platform", "fees", "prices": {want: amount}}], each price already multiplied by the quantity wanted.
-    new_customers: platforms on which the buyer still qualifies for new-customer offers.
+    stores: [{"ref", "fees", "prices": {want: amount}}], each price already multiplied by the quantity wanted.
 
     A plan covering more of the list ranks above one covering less, then the cheaper total wins. A plan is dropped when some of its own stores, used alone, cover as much for no more money, so a split appears only where it pays or covers more.
     """
-    def is_new(store):
-        return store["platform"] in new_customers
-
     memo = {}
     found = []
     for size in range(1, max_stores + 1):
         for group in combinations(stores, size):
-            result = _best_division(group, wants, is_new, memo)
+            result = _best_division(group, wants, memo)
             if result is None:
                 continue
             cost, assigned, missing, approximate = result
@@ -139,14 +133,14 @@ def plans(wants, stores, max_stores=2, new_customers=()):
             for i, store in enumerate(group):
                 items = [want for want in wants if assigned.get(want) == i]
                 subtotal = sum(store["prices"][want] for want in items)
-                fees = fee_lines(store, subtotal, is_new(store))
+                fees = fee_lines(store, subtotal)
                 baskets.append({
                     "ref": store["ref"],
                     "wants": items,
                     "subtotal": subtotal,
                     "fees": fees,
                     "total": subtotal + sum(amount for _, amount in fees),
-                    "next_threshold": next_threshold(store, subtotal, is_new(store)),
+                    "next_threshold": next_threshold(store, subtotal),
                 })
             found.append({"baskets": baskets, "missing": missing, "total": cost, "approximate": approximate})
 

@@ -1,0 +1,409 @@
+#!/usr/bin/env python3
+"""Shop Master: one shopping list priced across delivery platforms, fees included.
+
+A run moves through four commands: `where` fixes the delivery point, `gather` collects the stores, their fee rules and their candidate products for each wanted item, `pick` corrects which candidate stands for an item at a store (`drop` removes a store that does not belong), and `solve` ranks the ways to buy the list.
+"""
+
+import argparse
+import json
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+
+import bolt
+import glovo
+import solver
+import wolt
+
+PLATFORMS = {"wolt": wolt, "glovo": glovo, "bolt": bolt}
+POINT_FILE = Path.home() / ".config" / "shop-master" / "point.json"
+RUN_FILE = Path.home() / ".cache" / "shop-master" / "run.json"
+SAMPLE_BASKETS = (1000, 2500, 5000, 10000)
+ALSO_LISTED = 6  # stores named after the chosen ones, for adding by hand
+
+
+def money(amount):
+    return f"{amount / 100:.2f}"
+
+
+def load(path, what):
+    if not path.exists():
+        sys.exit(f"No {what} yet ({path} is missing).")
+    return json.loads(path.read_text())
+
+
+def save(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+
+
+def attempt(function, *args):
+    """Run one lookup, returning (result, None) or (None, reason).
+
+    A lookup that failed says nothing about what the store stocks, so the reason is kept and shown apart from "nothing found".
+    """
+    try:
+        return function(*args), None
+    except Exception as error:  # every failure of a remote lookup is reported the same way
+        return None, f"{type(error).__name__}: {error}"
+
+
+# --- where -----------------------------------------------------------------
+
+def where(args):
+    if args.lat is None:
+        point = load(POINT_FILE, "delivery point")
+        print(f"{point['lat']}, {point['lon']}  {point['label']}")
+        return
+    if args.lon is None:
+        sys.exit("Give both latitude and longitude.")
+    save(POINT_FILE, {"lat": args.lat, "lon": args.lon, "label": " ".join(args.label)})
+    print(f"Delivery point saved to {POINT_FILE}")
+
+
+# --- gather ----------------------------------------------------------------
+
+def parse_want(spec):
+    """'eggs*2=eggs|კვერცხი' -> ('eggs', 2, ['eggs', 'კვერცხი'])"""
+    left, _, queries = spec.partition("=")
+    key, _, quantity = left.partition("*")
+    return key.strip(), float(quantity) if quantity else 1, [q.strip() for q in (queries or key).split("|") if q.strip()]
+
+
+def gather(args):
+    point = load(POINT_FILE, "delivery point")
+    lat, lon = point["lat"], point["lon"]
+    if args.add:
+        run = load(RUN_FILE, "run to add to")
+    else:
+        run = {"food": args.food, "wants": {}, "stores": {}, "picks": {}}
+    run["at"] = datetime.now().astimezone().isoformat(timespec="minutes")
+    run["point"] = point
+    food = run["food"]
+    for spec in args.want:
+        key, quantity, queries = parse_want(spec)
+        run["wants"][key] = {"qty": quantity, "queries": queries}
+    if not run["wants"]:
+        sys.exit("Nothing wanted: pass at least one --want.")
+    platforms = args.platform.split(",") if args.platform else list(PLATFORMS)
+    problems, also = [], []
+    pool = ThreadPoolExecutor(6)
+
+    chosen = [tuple(spec.split(":", 1)) for spec in args.store]
+    if not args.add:
+        # Cross-store search shows which stores carry the most of the list; those are the ones worth reading closely.
+        tasks = [(p, key, q) for p in platforms for key, want in run["wants"].items() for q in want["queries"]]
+        answers = pool.map(lambda t: attempt(PLATFORMS[t[0]].discover, t[2], lat, lon, food), tasks)
+        seen, names = {}, {}
+        for (platform, key, query), (hits, error) in zip(tasks, answers):
+            if error:
+                problems.append(f"{platform}: cross-store search for {query!r} failed ({error})")
+                continue
+            for hit in hits:
+                if not (hit["open"] or args.closed):
+                    continue
+                names[platform, hit["store"]] = hit["name"]
+                cheapest = seen.setdefault((platform, hit["store"]), {})
+                cheapest[key] = min(cheapest.get(key, hit["price"]), hit["price"])
+        for platform in platforms:
+            ranked = sorted(
+                (item for item in seen.items() if item[0][0] == platform),
+                key=lambda item: (-len(item[1]), sum(item[1].values())),
+            )
+            chosen += [store for store, _ in ranked[: args.per_platform]]
+            if not ranked:
+                problems.append(f"{platform}: no {'restaurant' if food else 'store'} open now matched any of the list")
+            others = [f"{platform}:{store[1]} {names[store]} ({len(found)}/{len(run['wants'])})"
+                      for store, found in ranked[args.per_platform: args.per_platform + ALSO_LISTED]]
+            if others:
+                also.append(f"{platform} also matched: " + "; ".join(others))
+
+    known = {(s["platform"], s["key"]) for s in run["stores"].values()}
+    fresh = [store for store in dict.fromkeys(chosen) if store not in known]
+    records = pool.map(lambda s: attempt(PLATFORMS[s[0]].store, s[1], lat, lon), fresh)
+    for (platform, key), (record, error) in zip(fresh, records):
+        if error:
+            problems.append(f"{platform}: reading store {key!r} failed ({error})")
+            continue
+        number = 1 + sum(1 for s in run["stores"].values() if s["platform"] == platform)
+        run["stores"][f"{platform[0]}{number}"] = {"platform": platform, "key": key, **record, "offers": {}, "failed": {}}
+
+    def fill(pair):
+        ref, key = pair
+        store = run["stores"][ref]
+        offers, errors = {}, []
+        for query in run["wants"][key]["queries"]:
+            found, error = attempt(PLATFORMS[store["platform"]].shelf, store, query, lat, lon)
+            if error:
+                errors.append(error)
+            for offer in found or []:
+                offers.setdefault(offer["id"], offer)
+        return list(offers.values()), errors
+
+    pairs = [(ref, key) for ref, store in run["stores"].items() for key in run["wants"]
+             if key not in store["offers"] or key in store["failed"]]
+    for (ref, key), (offers, errors) in zip(pairs, pool.map(fill, pairs)):
+        store = run["stores"][ref]
+        store["failed"].pop(key, None)
+        if errors and not offers:
+            store["failed"][key] = errors[0]
+            store["offers"].pop(key, None)
+        else:
+            store["offers"][key] = offers
+    pool.shutdown()
+
+    save(RUN_FILE, run)
+    show_run(run)
+    print()
+    for line in also:
+        print(line)
+    for problem in problems:
+        print(f"! {problem}")
+
+
+# --- show ------------------------------------------------------------------
+
+def current_pick(run, ref, key):
+    """(candidate number, quantity) standing for a want at a store, or None when it has none."""
+    offers = run["stores"][ref]["offers"].get(key)
+    if not offers:
+        return None
+    pick = run["picks"].get(f"{ref}.{key}", {"n": 1})
+    if pick["n"] is None:
+        return None
+    return pick["n"], pick.get("qty") or run["wants"][key]["qty"]
+
+
+def describe_offer(offer):
+    parts = [offer["name"]]
+    if offer.get("unit"):
+        parts.append(f"[{offer['unit']}]")
+    price = money(offer["price"])
+    if offer.get("weighed"):
+        price += f" per {offer['per'][1]}, weighed" if offer.get("per") else ", weighed"
+    elif offer.get("per"):
+        price += f" ({money(offer['per'][0])}/{offer['per'][1]})"
+    if offer.get("was") and offer["was"] > offer["price"]:
+        price += f", was {money(offer['was'])}"
+    parts.append(price)
+    if offer.get("stock") is not None:
+        parts.append(f"stock {offer['stock']}")
+    return "  ".join(parts)
+
+
+def describe_store(store):
+    parts = [f"{store['platform'].title()} · {store['name']}"]
+    parts.append("open" if store["open"] else "CLOSED" + (f" ({store['opens']})" if store.get("opens") else ""))
+    parts += [store[field] for field in ("eta", "distance") if store.get(field)]
+    if store.get("rating"):
+        parts.append(f"rating {store['rating']}")
+    return " · ".join(parts)
+
+
+def show_run(run, only=None):
+    print(f"Run gathered {run['at']} for {run['point']['label'] or 'the saved point'} ({'restaurants' if run['food'] else 'stores'})")
+    width = max(len(key) for key in run["wants"])
+    for ref, store in run["stores"].items():
+        if only and ref != only:
+            continue
+        print(f"\n{ref}  {describe_store(store)}")
+        print(f"    {store['url']}")
+        samples = "  ".join(
+            f"{money(basket)}→{money(sum(amount for _, amount in solver.fee_lines(store, basket)))}" for basket in SAMPLE_BASKETS
+        )
+        print(f"    fees ({', '.join(fee['label'] for fee in store['fees'])}) by basket: {samples}")
+        if store.get("caveat"):
+            print(f"    caveat: {store['caveat']}")
+        for note in store.get("notes", []):
+            print(f"    {note}")
+        for key in run["wants"]:
+            label = key.ljust(width)
+            if key in store["failed"]:
+                print(f"    {label}  ?  lookup failed, so unknown: {store['failed'][key]}")
+                continue
+            offers = store["offers"].get(key, [])
+            if not offers:
+                print(f"    {label}  -  nothing found")
+                continue
+            pick = current_pick(run, ref, key)
+            for number, offer in enumerate(offers, 1):
+                mark = "*" if pick and pick[0] == number else " "
+                count = f" x{pick[1]:g}" if pick and pick[0] == number and pick[1] != 1 else ""
+                print(f"    {label if number == 1 else ' ' * width} {mark}{number}  {describe_offer(offer)}{count}")
+                if run["food"] and offer.get("note"):
+                    print(f"    {' ' * width}     {offer['note'][:220]}")
+            if not pick:
+                print(f"    {' ' * width}     (dropped: no candidate stands for this want here)")
+
+
+def show(args):
+    show_run(load(RUN_FILE, "run"), args.ref)
+
+
+# --- pick ------------------------------------------------------------------
+
+def pick(args):
+    run = load(RUN_FILE, "run")
+    for spec in args.picks:
+        target, _, choice = spec.partition("=")
+        ref, _, key = target.partition(".")
+        offers = run["stores"].get(ref, {}).get("offers", {}).get(key)
+        if not offers:
+            sys.exit(f"{target}: no candidates there to pick from.")
+        if choice == "-":
+            run["picks"][target] = {"n": None}
+            continue
+        number, _, quantity = choice.partition("x")
+        if not number.isdigit() or not 1 <= int(number) <= len(offers):
+            sys.exit(f"{spec}: candidate numbers at {target} run from 1 to {len(offers)}.")
+        run["picks"][target] = {"n": int(number), **({"qty": float(quantity)} if quantity else {})}
+    save(RUN_FILE, run)
+    print(f"{len(args.picks)} pick(s) saved.")
+
+
+def drop(args):
+    run = load(RUN_FILE, "run")
+    for ref in args.refs:
+        if ref not in run["stores"]:
+            sys.exit(f"{ref}: no such store in the run.")
+        del run["stores"][ref]
+        run["picks"] = {target: choice for target, choice in run["picks"].items() if not target.startswith(f"{ref}.")}
+    save(RUN_FILE, run)
+    print(f"{len(args.refs)} store(s) dropped.")
+
+
+# --- solve -----------------------------------------------------------------
+
+def price_exactly(run, plan, lines, quotes):
+    """Replace a plan's planning fees with the platform's own pricing wherever the platform prices a basket for us."""
+    for basket in plan["baskets"]:
+        store = run["stores"][basket["ref"]]
+        module = PLATFORMS[store["platform"]]
+        basket["basis"] = "partial" if store.get("partial") else "estimated" if store.get("caveat") else "planned"
+        if not hasattr(module, "quote"):
+            continue
+        key = (basket["ref"], tuple(basket["wants"]))
+        if key not in quotes:
+            quotes[key] = attempt(module.quote, store, [lines[basket["ref"], want] for want in basket["wants"]],
+                                  run["point"]["lat"], run["point"]["lon"])
+        fees, error = quotes[key]
+        if error:
+            basket["quote_error"] = error
+            continue
+        basket["fees"], basket["basis"] = fees, "priced"
+        basket["total"] = basket["subtotal"] + sum(amount for _, amount in fees)
+    plan["total"] = sum(basket["total"] for basket in plan["baskets"])
+
+
+def solve(args):
+    run = load(RUN_FILE, "run")
+    stores, lines, skipped = [], {}, []
+    for ref, store in run["stores"].items():
+        if not store["open"] and not args.closed:
+            skipped.append(f"{ref} {store['name']} is closed")
+            continue
+        prices = {}
+        for key in run["wants"]:
+            choice = current_pick(run, ref, key)
+            if choice:
+                offer = store["offers"][key][choice[0] - 1]
+                prices[key] = round(offer["price"] * choice[1])
+                lines[ref, key] = (offer, choice[1])
+        if prices:
+            stores.append({"ref": ref, "fees": store["fees"], "prices": prices})
+
+    ranked = solver.plans(list(run["wants"]), stores, args.max_stores)
+    if not ranked:
+        sys.exit("No open store in the run has any of the wanted items.")
+    listed = ranked[: args.top]
+    single = next((plan for plan in ranked if len(plan["baskets"]) == 1), None)
+    if single and single not in listed:
+        listed.append(single)
+    quotes = {}
+    for plan in listed:
+        price_exactly(run, plan, lines, quotes)
+    listed.sort(key=lambda plan: (len(plan["missing"]), plan["total"]))
+
+    currency = next((store["currency"] for store in run["stores"].values() if store.get("currency")), "")
+    print(f"Run gathered {run['at']} for {run['point']['label'] or 'the saved point'}; amounts in {currency}")
+    for position, plan in enumerate(listed, 1):
+        orders = len(plan["baskets"])
+        bases = {basket["basis"] for basket in plan["baskets"]}
+        total = money(plan["total"])
+        total = f"at least {total}" if "partial" in bases else f"about {total}" if bases - {"priced"} else total
+        covered = "everything covered" if not plan["missing"] else "WITHOUT " + ", ".join(plan["missing"])
+        note = "  (approximate: list too long for an exact search)" if plan["approximate"] else ""
+        print(f"\n{position}. {total} in {orders} order{'s' if orders > 1 else ''}, {covered}{note}")
+        for basket in plan["baskets"]:
+            store = run["stores"][basket["ref"]]
+            print(f"   {basket['ref']}  {describe_store(store)}")
+            print(f"      {store['url']}")
+            for key in basket["wants"]:
+                offer, quantity = lines[basket["ref"], key]
+                unit = f" [{offer['unit']}]" if offer.get("unit") else ""
+                print(f"      {key}: {quantity:g} × {offer['name']}{unit}  {money(round(offer['price'] * quantity))}")
+            fees = "".join(f" + {label} {money(amount)}" if amount >= 0 else f" − {label} {money(-amount)}" for label, amount in basket["fees"])
+            basis = {"priced": f"priced by {store['platform'].title()}", "planned": "planning estimate",
+                     "estimated": store.get("caveat"), "partial": store.get("caveat")}[basket["basis"]]
+            print(f"      goods {money(basket['subtotal'])}{fees} = {money(basket['total'])}  ({basis})")
+            if basket.get("quote_error"):
+                print(f"      ! {store['platform'].title()} did not price this basket ({basket['quote_error']})")
+            if basket["next_threshold"]:
+                extra, saved = basket["next_threshold"]
+                print(f"      {money(extra)} more goods here would cut the fees by {money(saved)}")
+
+    for key in run["wants"]:
+        if not any(key in store["prices"] for store in stores):
+            print(f"\n! {key}: no open store in the run offers it.")
+    for ref, store in run["stores"].items():
+        for key, reason in store["failed"].items():
+            print(f"! {ref} {key}: lookup failed, so unknown ({reason}). `gather --add` retries it.")
+    for note in skipped:
+        print(f"! left out: {note} (use --closed to plan with it)")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    p = commands.add_parser("where", help="show the delivery point, or set it")
+    p.add_argument("lat", nargs="?", type=float)
+    p.add_argument("lon", nargs="?", type=float)
+    p.add_argument("label", nargs="*", help="a name for the point, for the reports")
+    p.set_defaults(run=where)
+
+    p = commands.add_parser("gather", help="collect stores, fee rules and candidate products for the list")
+    p.add_argument("--want", action="append", default=[], metavar="KEY[*QTY]=QUERY[|QUERY]", help="a wanted item and what to search for; repeat per item")
+    p.add_argument("--food", action="store_true", help="look at restaurants and their dishes instead of stores")
+    p.add_argument("--store", action="append", default=[], metavar="PLATFORM:KEY", help="include this store whatever the search ranks")
+    p.add_argument("--per-platform", type=int, default=3, help="stores taken from each platform's ranking (default 3)")
+    p.add_argument("--platform", help="comma-separated platforms to use (default: all)")
+    p.add_argument("--closed", action="store_true", help="also consider stores that are closed now")
+    p.add_argument("--add", action="store_true", help="extend the current run with more wants or stores, and retry failed lookups")
+    p.set_defaults(run=gather)
+
+    p = commands.add_parser("show", help="print the current run")
+    p.add_argument("ref", nargs="?", help="only this store")
+    p.set_defaults(run=show)
+
+    p = commands.add_parser("pick", help="choose which candidate stands for a want at a store")
+    p.add_argument("picks", nargs="+", metavar="REF.WANT=N[xQTY]|-", help="e.g. w1.milk=2  g1.eggs=1x2  b1.rice=-  (- means none fits)")
+    p.set_defaults(run=pick)
+
+    p = commands.add_parser("drop", help="remove stores from the run")
+    p.add_argument("refs", nargs="+", metavar="REF")
+    p.set_defaults(run=drop)
+
+    p = commands.add_parser("solve", help="rank the ways to buy the list")
+    p.add_argument("--max-stores", type=int, default=2, help="most orders a plan may use (default 2)")
+    p.add_argument("--top", type=int, default=3, help="plans to print (default 3)")
+    p.add_argument("--closed", action="store_true", help="plan with stores that are closed now")
+    p.set_defaults(run=solve)
+
+    args = parser.parse_args()
+    args.run(args)
+
+
+if __name__ == "__main__":
+    main()

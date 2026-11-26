@@ -6,16 +6,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / ".claude" / "ski
 
 import solver  # noqa: E402
 
-FLAT = "flat"
-
-
-def store(ref, prices, delivery=0, minimum=0, platform="p", extra_fees=()):
+def store(ref, prices, delivery=0, minimum=0):
     """A store with a flat delivery price and a surcharge topping baskets up to `minimum`."""
     fees = [{"label": "Delivery", "segments": [[0, None, delivery, 0]]}]
     if minimum:
         fees.append({"label": "Small order", "segments": [[0, minimum, minimum, -1]]})
-    fees.extend(extra_fees)
-    return {"ref": ref, "platform": platform, "fees": fees, "prices": prices}
+    return {"ref": ref, "fees": fees, "prices": prices}
 
 
 def shape(plan):
@@ -83,12 +79,6 @@ class Plans(unittest.TestCase):
         ranked = solver.plans(wants, [a, b])
         self.assertTrue(all(len(plan["baskets"]) == 1 for plan in ranked))
 
-    def test_new_customer_offer_counts_only_for_new_customers(self):
-        offer = {"label": "New customer delivery", "segments": [[0, None, -300, 0]], "new_customer": True}
-        s = store("A", {"milk": 500}, delivery=300, platform="wolt", extra_fees=[offer])
-        self.assertEqual(solver.plans(["milk"], [s])[0]["total"], 800)
-        self.assertEqual(solver.plans(["milk"], [s], new_customers={"wolt"})[0]["total"], 500)
-
     def test_three_stores_are_used_only_when_allowed(self):
         wants = ["a", "b", "c"]
         stores = [store("A", {"a": 100}), store("B", {"b": 100}), store("C", {"c": 100})]
@@ -115,7 +105,7 @@ class NextThreshold(unittest.TestCase):
         self.assertIsNone(solver.next_threshold(s, 2600))
 
     def test_free_delivery_threshold(self):
-        s = {"ref": "A", "platform": "p", "fees": [{"label": "Delivery", "segments": [[0, 4000, 399, 0]]}], "prices": {}}
+        s = {"ref": "A", "fees": [{"label": "Delivery", "segments": [[0, 4000, 399, 0]]}], "prices": {}}
         self.assertEqual(solver.next_threshold(s, 3500), (500, 399))
 
 
