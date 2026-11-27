@@ -22,49 +22,46 @@ It needs Python 3 and nothing else: no account on any platform, no API key, no p
 
 Tell Claude once where deliveries go, as coordinates from a maps app: "my delivery point is 41.6938, 44.8015". Then ask in plain words:
 
-- "I need milk, eggs, bread, rice and black pepper. Where should I order?"
+- "I need two litres of milk, twenty eggs, bread, a kilo of rice and black pepper. Where should I order?"
 - "Paracetamol and a phone charger, delivered now. What is the cheapest way?"
 - "Compare a chicken shawarma across the apps. What comes with it, and which is nearest?"
 
 or run `/shop-master:shop-master`.
 
-Claude searches the three platforms, works out which product on each shelf is the one you meant, and answers with the store or stores, what goes in each basket, the total with every fee, and links for checking out in the app. The arithmetic underneath looks like this:
+Claude searches the three platforms, works out which product on each shelf is the one you meant and how many packs your amount comes to, and answers with the store or stores, what goes in each basket, the total with every fee, and links for checking out in the app. The arithmetic underneath looks like this, for milk, bread and paracetamol (store links left out):
 
 ```
-1. about 25.26 in 1 order, everything covered
-   g2  Glovo · Nikora Supermarket · open · 1.8km · rating 97%
-      milk: 1 × რძე ულტრაპასტერიზებული 2.5% 1ლ სანტე  5.80
-      ...
-      goods 17.49 + Delivery 2.49 + Service fee 2.29 + Small order fee 2.99 = 25.26
-      12.51 more goods here would cut the fees by 2.58
-
-2. 29.50 in 1 order, everything covered
-   w3  Wolt · VAKE BY SPAR Tsotne Dadiani · open · 35-45 min · 2.7 km · rating 9.2
-      ...
-      goods 21.58 + Bag 0.20 + Small order fee 1.90 + Service fee 1.73 + Delivery (2.7 km) 4.09 = 29.50  (priced by Wolt)
+4. about 21.47 in 2 orders, everything covered  [best with every fee known]
+   g1  Glovo · Goodwill · open · 100m · rating 98%
+      milk: 1 × სანტე რძე 2.5% 1 ლ./4860051001298 [1 l]  3.75
+      bread: 1 × ბატონი ქართო დაჭრილი  1.65
+      goods 5.40 + Delivery 0.99 + Service fee 2.29 + Small order fee 2.99 = 11.67  (fees and offers are computed from Glovo's published parameters, not priced by Glovo)
+   w4  Wolt · Aversi Opera · open · 25-35 min · 970 m · rating 9.8
+      paracetamol: 1 × პარაცეტამოლი 0.5გ #20ტ [0.5 g]  4.26
+      goods 4.26 + Small order fee 2.99 + Service fee 1.00 + Delivery (970 m) 1.55 = 9.80  (priced by Wolt)
 ```
 
-When no store has everything, it finds the division between two stores that costs least, moving an item to the dearer shelf where that lifts a basket over a fee threshold.
+When no store has everything, it finds the division between two stores that costs least, moving an item to the dearer shelf where that lifts a basket over a fee threshold. A list that mixes groceries with a pharmacy or household item gets a store for each kind.
 
 ## How far to trust a total
 
 | Platform | Total is | Because |
 |---|---|---|
-| Wolt | exact | Wolt prices any basket for an anonymous visitor, and the tool asks it. |
-| Glovo | "about" | It is computed from the delivery price, service-fee percentage and small-basket surcharge Glovo publishes for each store. Glovo itemises a basket's fees only after sign-in, so the computation is unchecked. |
+| Wolt | exact | Wolt prices any basket for an anonymous visitor, and the tool asks it, the store's campaigns included. |
+| Glovo | "about" | It is computed from the delivery price, service-fee percentage and small-basket surcharge Glovo publishes for each store. Glovo itemises a basket's fees only after sign-in, so the service fee is unchecked. |
 | Bolt Food | "at least" | Bolt shows only the delivery price before sign-in. Its service, small-order and packaging fees are missing from the total, so Bolt looks cheaper than it is. |
 
-A store's offers that are open to every customer, such as "GEL10 off on orders over GEL60", are counted in its totals. Prices, stock and opening hours are those of the moment of the search.
+For that reason the best plan made only of fully known fees is always shown beside the cheapest-looking ones. A store's offers that are open to every customer, such as "GEL10 off on orders over GEL60", are counted. Prices, stock and opening hours are those of the moment of the search; delivery prices in particular move through the day.
 
 ## What it does not do
 
 - It does not order, pay, or fill a cart. You check out in the app.
-- It does not know your account. New-customer offers and subscriber prices are listed where a platform advertises them and left out of the totals, and what Glovo Prime, Wolt+ or Bolt Plus would change for you is not computed. That needs a signed-in session, which is not built.
+- It does not know your account. New-customer offers and subscriber prices are listed where a platform advertises them and left out of the totals. With Wolt+, Glovo Prime or Bolt Plus you pay less on that platform than shown, by up to the delivery fee and most of the service fee; Claude will say which way that tilts a close comparison, and cannot compute it without a signed-in session, which is not built.
 - It was built and tested in Tbilisi. Other cities where these platforms operate are untried.
 
 ## The platforms' terms
 
-Shop Master reads the private web interfaces that the platforms' own sites use, at a paced, low volume. Those interfaces can change without notice, and the platforms' terms may restrict automated reading: you use it at your own risk. The project is not affiliated with Wolt, Glovo or Bolt.
+Shop Master reads the private web interfaces that the platforms' own sites use. Wolt's terms forbid "bots or other automated methods" and access other than through its app and website, and Bolt Food's forbid "any automated collection of data" from its platform; Glovo's terms were not readable. Using this tool is therefore against at least two of the three, and you use it at your own risk. It asks for little: one comparison is on the order of a hundred paced requests, it waits when a platform throttles it, and it does not retry a refusal. The interfaces can change without notice. The project is not affiliated with Wolt, Glovo or Bolt.
 
 [skills/shop-master/platforms.md](skills/shop-master/platforms.md) records how each platform is read and how its fee rules were measured.
 
