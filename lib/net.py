@@ -1,37 +1,76 @@
-"""HTTP for the platform adapters: JSON in and out, paced per host, patient when throttled or cut off."""
+"""HTTP for the platform adapters: JSON in and out, paced and counted per host across runs, patient when throttled or cut off."""
 
 import base64
 import gzip
 import json
+import os
 import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
+from pathlib import Path
 from urllib.parse import urlencode, urlsplit
+
+try:
+    import fcntl
+except ImportError:  # Windows has no file locks of this kind; there the pacing holds within one run
+    fcntl = None
 
 # Seconds between two requests to one host. One a second is well under what the platforms' own pages send while loading; at three a second Glovo answered 429 in most gathers.
 GAP = 1.0
 # A request made for a signed-in account keeps a wider berth, and is made once: the first pushback is taken as the answer.
 ACCOUNT_GAP = 3.0
+# The most one host is asked in an hour, and the most of that for a signed-in account. They are this tool's own restraint, set well above what pricing
+# a few lists takes and well below what the gaps alone would allow; no platform publishes a figure.
+HOURLY = 900
+ACCOUNT_HOURLY = 40
 RETRY_ON = (429, 502, 503, 504)
 ATTEMPTS = 4
+# What has been asked of each host and when it may next be asked. It is kept on disk so that runs one after another, or side by side, pace themselves as one.
+PACE_FILE = Path.home() / ".cache" / "shop-master" / "pace.json"
 
-_next_slot = {}
 _lock = threading.Lock()
 
 
-def _wait_turn(host, gap):
-    with _lock:
-        now = time.monotonic()
-        slot = max(now, _next_slot.get(host, 0.0))
-        _next_slot[host] = slot + gap
+@contextmanager
+def _pace(host):
+    """One host's pacing record, held against other threads and other runs while it is read and amended."""
+    PACE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with _lock, os.fdopen(os.open(PACE_FILE, os.O_RDWR | os.O_CREAT, 0o600), "r+") as kept:
+        if fcntl:
+            fcntl.flock(kept, fcntl.LOCK_EX)
+        try:
+            record = json.loads(kept.read() or "{}")
+        except ValueError:  # a run was stopped while writing it
+            record = {}
+        yield record.setdefault(host, {})
+        kept.seek(0)
+        kept.truncate()
+        json.dump(record, kept)
+
+
+def _wait_turn(host, gap, acting=False):
+    """Take the next free moment on `host` and wait for it. Refuses once the host has been asked as often as this tool asks in an hour."""
+    with _pace(host) as asked:
+        now = time.time()
+        if "since" not in asked or now - asked["since"] >= 3600:
+            asked.update(since=now, count=0, for_account=0)
+        if asked["count"] >= HOURLY or (acting and asked["for_account"] >= ACCOUNT_HOURLY):
+            whose, most = (" for your account", ACCOUNT_HOURLY) if asked["count"] < HOURLY else ("", HOURLY)
+            again = time.strftime("%H:%M", time.localtime(asked["since"] + 3600))
+            raise RuntimeError(f"{host} has been asked {most} times within the hour{whose}, the most this tool asks; it may be asked again from {again}")
+        asked["count"] += 1
+        asked["for_account"] += bool(acting)
+        slot = max(now, asked.get("next", 0))
+        asked["next"] = slot + gap
     time.sleep(slot - now)
 
 
 def _hold(host, seconds):
-    """Keep every thread off `host` for a while: a throttled host is throttling all of them."""
-    with _lock:
-        _next_slot[host] = max(_next_slot.get(host, 0.0), time.monotonic() + seconds)
+    """Keep every thread and every run off `host` for a while: a throttled host is throttling all of them."""
+    with _pace(host) as asked:
+        asked["next"] = max(asked.get("next", 0), time.time() + seconds)
 
 
 def _reply(raw):
@@ -61,7 +100,7 @@ def fetch(url, headers=None, body=None, form=None, timeout=40, acting=False):
     host, call = target.netloc, f"{target.netloc}{target.path}"
     attempts = 1 if acting else ATTEMPTS
     for attempt in range(attempts):
-        _wait_turn(host, ACCOUNT_GAP if acting else GAP)
+        _wait_turn(host, ACCOUNT_GAP if acting else GAP, acting)
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read()
