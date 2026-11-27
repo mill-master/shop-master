@@ -116,7 +116,12 @@ def fetch(url, headers=None, body=None, form=None, timeout=40, acting=False, pat
                 raw = response.read()
                 if response.headers.get("content-encoding") == "gzip":
                     raw = gzip.decompress(raw)
+            if not raw.strip():
+                return {}  # a call that only acknowledges may answer with nothing
+            try:
                 return json.loads(raw)
+            except ValueError as odd:
+                raise RuntimeError(f"{call} answered with something that is not JSON") from odd
         except urllib.error.HTTPError as error:
             if error.code == 429 and attempt == attempts - 1:
                 with _pace(host) as asked:

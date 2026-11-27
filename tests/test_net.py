@@ -132,6 +132,18 @@ class Fetch(unittest.TestCase):
             with mock.patch.object(net.time, "time", lambda: later), mock.patch.object(net.urllib.request, "urlopen", lambda request, timeout: reply({"ok": 1})):
                 self.assertEqual(net.fetch("https://example.test/"), {"ok": 1})
 
+    def test_a_reply_with_nothing_in_it_is_an_empty_answer_and_one_that_is_not_json_names_its_call(self):
+        def answering(raw):
+            body = io.BytesIO(raw)
+            body.headers = {}
+            return lambda request, timeout: body
+        with mock.patch.object(net.time, "sleep", lambda pause: None):
+            with mock.patch.object(net.urllib.request, "urlopen", answering(b"")):
+                self.assertEqual(net.fetch("https://example.test/logout"), {})
+            with mock.patch.object(net.urllib.request, "urlopen", answering(b"<html>busy</html>")), \
+                    self.assertRaisesRegex(RuntimeError, r"^example.test/logout answered with something that is not JSON$"):
+                net.fetch("https://example.test/logout")
+
     def test_a_request_whose_failure_is_the_answer_is_made_once(self):
         queue = [http_error(503), {"ok": 1}]
 

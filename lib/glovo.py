@@ -96,8 +96,13 @@ def _headers(lat, lon, located=False, account=False):
         if lapses(ACCOUNT["access_token"]) - time.time() < 60:
             renewed = fetch(f"{API}/oauth/refresh", {**headers, "glovo-device-urn": ACCOUNT["device_urn"]}, {"refreshToken": ACCOUNT["refresh_token"]}, acting=True)
             renewed = renewed.get("access", renewed)
-            ACCOUNT.update(access_token=renewed["accessToken"], refresh_token=renewed["refreshToken"])
+            # A renewal may hand back a new refresh token or leave the old one standing; a new one is kept whatever else the reply holds.
+            ACCOUNT["refresh_token"] = renewed.get("refreshToken") or ACCOUNT["refresh_token"]
+            if renewed.get("accessToken"):
+                ACCOUNT["access_token"] = renewed["accessToken"]
             keep()
+            if not renewed.get("accessToken"):
+                raise RuntimeError("Glovo renewed the sign-in with a reply this tool does not know, so the account is not used")
         headers["glovo-device-urn"] = ACCOUNT["device_urn"]
         headers["authorization"] = ACCOUNT["access_token"]
     return headers
@@ -286,7 +291,7 @@ def sign_in(ask, tell, lat, lon):
             raise RuntimeError("Glovo did not accept that password.") from refusal
         raise
     if "access" not in reply:
-        raise RuntimeError("Glovo asks for a second step on this sign-in, and that step carries a captcha this tool does not solve. "
+        raise RuntimeError("Glovo did not hand over a sign-in for that password. It may want a second step, which carries a captcha this tool does not solve. "
                            "Sign in through a browser window instead: login glovo --browser.")
     return {"device_id": device, "device_urn": headers["glovo-device-urn"],
             "access_token": reply["access"]["accessToken"], "refresh_token": reply["access"]["refreshToken"]}

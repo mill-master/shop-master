@@ -89,6 +89,15 @@ def save_accounts(accounts):
     os.replace(fresh, ACCOUNTS_FILE)
 
 
+def kept_accounts():
+    """The sign-ins kept on this computer, as the one record a command works on: a platform that renews a session saves it into this record and no other."""
+    accounts = load_accounts()
+    for name, module in PLATFORMS.items():
+        module.ACCOUNT = accounts.get(name)
+        module.keep = lambda: save_accounts(accounts)
+    return accounts
+
+
 def describe_account(platform, session, point):
     resting = session.get("resting")
     if resting and (resting["until"] is None or resting["until"] > time.time()):
@@ -127,13 +136,17 @@ def login(args):
     if getattr(PLATFORMS[args.platform], "NO_SIGN_IN", None):
         sys.exit(PLATFORMS[args.platform].NO_SIGN_IN)
     point = load(POINT_FILE, "delivery point")
-    accounts = load_accounts()
+    accounts = kept_accounts()
     try:
         session = through_browser(args.platform) if args.browser else PLATFORMS[args.platform].sign_in(
             lambda prompt, secret=False: getpass.getpass(prompt) if secret else input(prompt), print, point["lat"], point["lon"])
     except RuntimeError as refusal:
         said = getattr(refusal, "reply", None)
         sys.exit(f"Not signed in. {refusal}" + (f"\n{args.platform.title()} said: {said}" if said else ""))
+    except (KeyError, TypeError, AttributeError, ValueError) as odd:
+        # The steps of a sign-in from the terminal are read from the platforms' own sites, and few have met a real account.
+        sys.exit(f"Not signed in. {args.platform.title()} answered a step of the sign-in in a form this tool does not know ({type(odd).__name__}: {odd}). "
+                 f"Sign in through a browser window instead: login {args.platform} --browser.")
     session["via"] = "a browser window" if args.browser else "the terminal"
     accounts[args.platform] = PLATFORMS[args.platform].ACCOUNT = session
     save_accounts(accounts)
@@ -142,19 +155,20 @@ def login(args):
 
 
 def logout(args):
-    accounts = load_accounts()
+    accounts = kept_accounts()
     session = accounts.pop(args.platform, None)
     if not session:
         sys.exit(f"Not signed in to {args.platform.title()}.")
     save_accounts(accounts)
     module, point = PLATFORMS[args.platform], load(POINT_FILE, "delivery point")
     _, error = attempt(module.sign_out, session, point["lat"], point["lon"]) if hasattr(module, "sign_out") else (None, None)
-    print(f"Signed out of {args.platform.title()}; its token is removed from this computer."
-          + (f" Telling {args.platform.title()} to end the session failed ({error}), so end it in the app if that matters." if error else ""))
+    print(f"The {args.platform.title()} token is removed from this computer, "
+          + (f"but asking {args.platform.title()} to end the session failed ({error}), so end it in the app if that matters." if error
+             else f"and {args.platform.title()} was asked to end the session."))
 
 
 def account(args):
-    point, accounts = load(POINT_FILE, "delivery point"), load_accounts()
+    point, accounts = load(POINT_FILE, "delivery point"), kept_accounts()
     for platform, module in PLATFORMS.items():
         print(describe_account(platform, accounts[platform], point) if platform in accounts
               else f"{platform.title()}: read signed out only" if getattr(module, "NO_SIGN_IN", None) else f"{platform.title()}: not signed in")
@@ -601,6 +615,7 @@ def price_exactly(run, plan, lines, quotes):
 
 def solve(args):
     run = load_run()
+    kept_accounts()
     if not run["signed_in"]:
         for module in PLATFORMS.values():
             module.ACCOUNT = None  # the shopper chose a run in which nothing is asked in their name
@@ -736,10 +751,6 @@ def main():
     p.set_defaults(run=account)
 
     args = parser.parse_args()
-    accounts = load_accounts()
-    for name, module in PLATFORMS.items():
-        module.ACCOUNT = accounts.get(name)
-        module.keep = lambda: save_accounts(accounts)
     args.run(args)
 
 

@@ -188,12 +188,21 @@ def quote(store, lines, lat, lon):
     session, note = (ACCOUNT, None) if ACCOUNT and not ACCOUNT.get("resting") else (None, None)
     if session:
         try:
-            rows = _checkout(store, items, lat, lon, session)["checkout_rows"]
+            priced = _priced(_checkout(store, items, lat, lon, session), scale)
         except RuntimeError as answer:
             session, note = None, _rest(ACCOUNT, answer)
+        except (KeyError, TypeError) as odd:
+            # Pricing for an account can come in rows a visitor's never has. A reply this reading cannot follow is said, not guessed at.
+            session, note = None, f"Wolt priced this basket for your account in a form this tool does not read ({type(odd).__name__}: {odd}), so it is priced as for any visitor"
     if not session:
-        rows = _checkout(store, items, lat, lon)["checkout_rows"]
-    priced = {"goods": None, "fees": [], "offers": [row["label"] for row in rows if row.get("template") == "discount_row"], "mine": bool(session), "note": note}
+        priced = _priced(_checkout(store, items, lat, lon), scale)
+    return {**priced, "mine": bool(session), "note": note}
+
+
+def _priced(reply, scale):
+    """What a checkout reply charges: the goods, the fees as (label, amount) pairs, and the names of the offers applied."""
+    rows = reply["checkout_rows"]
+    priced = {"goods": None, "fees": [], "offers": [row["label"] for row in rows if row.get("template") == "discount_row"]}
     for row in rows:
         if row.get("template") == "price_total_amount_row":
             break  # what follows the total repeats the offers already counted above it
@@ -371,8 +380,16 @@ def _link_token(link):
     raise RuntimeError("That link carries no sign-in token. Copy the address of the button in Wolt's e-mail, without opening it.")
 
 
+def _lapse(reply):
+    """When the access token in a token reply lapses: by the token itself, or failing that by the lifetime the reply states."""
+    return lapses(reply["access_token"]) or time.time() + reply.get("expires_in", 0)
+
+
 def _session(reply):
-    return {"refresh_token": reply["refresh_token"], "access_token": reply["access_token"], "expires_at": time.time() + reply.get("expires_in", 0)}
+    """The session in a reply that hands over tokens."""
+    if not reply.get("refresh_token") or not reply.get("access_token"):
+        raise RuntimeError("Wolt answered the sign-in without the tokens this tool expects, so it stopped.")
+    return {"refresh_token": reply["refresh_token"], "access_token": reply["access_token"], "expires_at": _lapse(reply)}
 
 
 def from_browser(cookies, storage):
@@ -426,10 +443,13 @@ def authorized(session):
     """Request headers that act for the signed-in account. An access token about to lapse is renewed first, and the session kept."""
     if session["expires_at"] - time.time() < 120:
         reply = fetch(f"{AUTH}/v1/wauth2/access_token", HEADERS, form={"grant_type": "refresh_token", "refresh_token": session["refresh_token"]}, acting=True)
-        # Wolt can replace the refresh token on use, after which the old one is dead: the new one is stored before anything else happens.
-        session.update(access_token=reply["access_token"], expires_at=time.time() + reply.get("expires_in", 0),
-                       refresh_token=reply.get("refresh_token") or session["refresh_token"])
+        # Wolt can replace the refresh token on use, after which the old one is dead: a new one is kept whatever else the reply holds.
+        session["refresh_token"] = reply.get("refresh_token") or session["refresh_token"]
+        if reply.get("access_token"):
+            session.update(access_token=reply["access_token"], expires_at=_lapse(reply))
         keep()
+        if not reply.get("access_token"):
+            raise RuntimeError("Wolt renewed the sign-in with a reply this tool does not know, so the account is not used")
     return {**HEADERS, "authorization": f"Bearer {session['access_token']}"}
 
 

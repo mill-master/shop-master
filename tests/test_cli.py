@@ -15,6 +15,8 @@ sys.path.insert(0, str(ROOT / "lib"))
 loader = SourceFileLoader("shopmaster_cli", str(ROOT / "bin" / "shopmaster"))
 cli = module_from_spec(spec_from_loader(loader.name, loader))
 loader.exec_module(cli)
+# No case reads or writes the sign-ins really kept on the computer: a case that needs sign-ins points this at a folder of its own.
+cli.ACCOUNTS_FILE = Path("/nonexistent/shop-master/accounts.json")
 
 
 def offer(name, price, **extra):
@@ -73,6 +75,7 @@ class Cli(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         cli.RUN_FILE = Path(folder.name) / "run.json"
+        cli.ACCOUNTS_FILE = Path(folder.name) / "accounts.json"
         cli.PLATFORMS = {"alpha": SimpleNamespace(), "beta": SimpleNamespace()}  # platforms that price nothing themselves
         cli.save(cli.RUN_FILE, sample_run())
 
@@ -144,10 +147,10 @@ class Cli(unittest.TestCase):
         def quote(store, lines, lat, lon):
             priced_for.append(cli.PLATFORMS["beta"].ACCOUNT)
             return {"goods": None, "fees": [("Delivery", 250)], "offers": [], "mine": bool(cli.PLATFORMS["beta"].ACCOUNT), "note": None}
-        cli.PLATFORMS = {"alpha": SimpleNamespace(), "beta": SimpleNamespace(ACCOUNT={"token": "t"}, quote=quote)}
+        cli.PLATFORMS = {"alpha": SimpleNamespace(), "beta": SimpleNamespace(quote=quote)}
+        cli.save_accounts({"beta": {"token": "t"}})
         self.assertIn("for home, signed out; amounts in GEL", self.solve())
         self.assertEqual(set(map(type, priced_for)), {type(None)})
-        cli.PLATFORMS["beta"].ACCOUNT = {"token": "t"}
         self.change(lambda run: run.update(signed_in=True))
         report = self.solve()
         self.assertIn("for home, signed in; amounts in GEL", report)

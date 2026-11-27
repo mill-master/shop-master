@@ -27,6 +27,8 @@ import wolt  # noqa: E402
 loader = SourceFileLoader("shopmaster_accounts", str(ROOT / "bin" / "shopmaster"))
 cli = module_from_spec(spec_from_loader(loader.name, loader))
 loader.exec_module(cli)
+# No case reads or writes the sign-ins really kept on the computer: a case that needs sign-ins points this at a folder of its own.
+cli.ACCOUNTS_FILE = Path("/nonexistent/shop-master/accounts.json")
 
 POINT = (41.6938, 44.8015)
 
@@ -116,6 +118,18 @@ class Wolt(unittest.TestCase):
         self.assertEqual(headers["authorization"], "Bearer new")
         self.assertEqual(kept[0]["refresh_token"], "r2")
 
+    def test_a_renewal_that_hands_over_no_access_token_keeps_the_new_refresh_token_and_says_so(self):
+        session, kept = {"access_token": "old", "refresh_token": "r1", "expires_at": 0}, []
+        with mock.patch.object(wolt, "fetch", recording({"wauth2/access_token": {"refresh_token": "r2"}}, [])), \
+                mock.patch.object(wolt, "keep", lambda: kept.append(dict(session))), self.assertRaisesRegex(RuntimeError, "renewed the sign-in with a reply this tool does not know"):
+            wolt.authorized(session)
+        self.assertEqual(kept[-1]["refresh_token"], "r2")
+
+    def test_a_sign_in_answered_without_tokens_stops_in_plain_words(self):
+        with mock.patch.object(wolt, "fetch", recording({"wauth2/access_token": {"status": "ok"}}, [])), \
+                self.assertRaisesRegex(RuntimeError, "without the tokens this tool expects"):
+            wolt.sign_in(answers("", "https://wolt.com/en/me/magic_login?token=abc"), lambda text: None, *POINT)
+
     def test_a_valid_token_is_used_as_it_is(self):
         session = {"access_token": "good", "refresh_token": "r1", "expires_at": time.time() + 900}
         with mock.patch.object(wolt, "fetch", recording({}, [])):
@@ -190,6 +204,13 @@ class WoltAccountPricing(unittest.TestCase):
         self.assertTrue(priced["mine"])
         self.assertNotIn("resting", account)
 
+    def test_a_pricing_for_the_account_in_an_unknown_form_falls_back_to_a_visitor_s(self):
+        replies = iter([{"rows_of_another_kind": []}, self.ROWS])
+        priced, calls, _ = self.price(self.account(), lambda body: next(replies))
+        self.assertEqual((priced["mine"], priced["goods"], len(calls)), (False, 500, 2))
+        self.assertIn("in a form this tool does not read (KeyError: 'checkout_rows'), so it is priced as for any visitor", priced["note"])
+        self.assertNotIn("authorization", calls[1][1])
+
     def test_a_refusal_rests_the_account_until_the_next_sign_in(self):
         account = self.account()
         replies = iter([refusal(403, {}), self.ROWS])
@@ -237,6 +258,20 @@ class Glovo(unittest.TestCase):
         self.assertEqual((headers["authorization"], headers["glovo-device-urn"]), (fresh, "glv:device:1"))
         self.assertEqual(kept[0]["refresh_token"], "r2")
         self.assertNotIn("authorization", visiting)  # shelves and stores are read without the account
+
+    def test_a_renewal_may_leave_the_refresh_token_standing_and_one_without_an_access_token_is_said(self):
+        fresh = token(1200)
+        for reply, kept_refresh, fails in (({"accessToken": fresh}, "r1", False), ({"access": {"accessToken": fresh, "refreshToken": "r2"}}, "r2", False), ({"refreshToken": "r3"}, "r3", True)):
+            account = {"device_urn": "glv:device:1", "access_token": token(20), "refresh_token": "r1"}
+            table = {"addresslookup": self.PLACE, "seo-content": {}, "oauth/refresh": reply}
+            with self.subTest(reply=sorted(reply)), mock.patch.object(glovo, "fetch", recording(table, [])), mock.patch.dict(glovo._places, clear=True), \
+                    mock.patch.object(glovo, "ACCOUNT", account), mock.patch.object(glovo, "keep", lambda: None):
+                if fails:
+                    with self.assertRaisesRegex(RuntimeError, "renewed the sign-in with a reply this tool does not know"):
+                        glovo._headers(*POINT, True, account=True)
+                else:
+                    self.assertEqual(glovo._headers(*POINT, True, account=True)["authorization"], fresh)
+                self.assertEqual(account["refresh_token"], kept_refresh)
 
     def test_the_session_glovo_s_site_leaves_is_its_stored_refresh_token_and_device(self):
         # As Glovo's web client writes them: the refresh token and the device in local storage as JSON, the access token in a cookie.
@@ -305,6 +340,40 @@ class TokenFile(unittest.TestCase):
     def test_a_sign_in_records_how_it_was_made(self):
         self.through_a_browser("wolt", ({"__wtoken": quote(json.dumps({"accessToken": "a.b.c"})), "__wrtoken": quote(json.dumps("refresh-1"))}, {}))
         self.assertEqual(cli.load_accounts()["wolt"]["via"], "a browser window")
+
+    def with_wolt(self, table):
+        """The real Wolt reader behind the tool's commands, answered from `table`, with what it holds put back afterwards."""
+        held = contextlib.ExitStack()
+        held.enter_context(mock.patch.object(cli, "PLATFORMS", {"wolt": wolt}))
+        held.enter_context(mock.patch.object(wolt, "ACCOUNT", None))
+        held.enter_context(mock.patch.object(wolt, "keep", wolt.keep))
+        held.enter_context(mock.patch.object(wolt, "fetch", recording(table, [])))
+        held.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        return held
+
+    RENEWAL = {"wauth2/access_token": lambda form: {"access_token": token(1800), "refresh_token": "r2"}}
+
+    def test_a_token_renewed_while_the_account_is_read_is_the_one_kept(self):
+        # Wolt replaces the refresh token when it renews: the new one has to reach the file, or the sign-in is lost.
+        cli.save_accounts({"wolt": {"access_token": "old", "refresh_token": "r1", "expires_at": 0}})
+        me = {"user": {"name": {"first_name": "Nino"}, "country": "GEO"}}
+        with self.with_wolt({**self.RENEWAL, "user/me": me, "subscriptions-api": {"subscriptions": []}}):
+            cli.account(SimpleNamespace())
+        self.assertEqual(cli.load_accounts()["wolt"]["refresh_token"], "r2")
+
+    def test_a_token_renewed_while_signing_out_does_not_bring_the_sign_in_back(self):
+        cli.save_accounts({"wolt": {"access_token": "old", "refresh_token": "r1", "expires_at": 0}, "glovo": {"refresh_token": "g1"}})
+        with self.with_wolt({**self.RENEWAL, "wauth2/logout": {}}) as held:
+            cli.logout(SimpleNamespace(platform="wolt"))
+        self.assertEqual(cli.load_accounts(), {"glovo": {"refresh_token": "g1"}})
+
+    def test_a_sign_in_step_answered_in_an_unknown_form_stops_in_plain_words(self):
+        odd = {"captcha/site_key": {"site_key": None}}  # no operation token, which the next step needs
+        with self.with_wolt(odd), mock.patch("builtins.input", lambda prompt: "+995555123456"), self.assertRaises(SystemExit) as stopped:
+            cli.login(SimpleNamespace(platform="wolt", browser=False))
+        self.assertEqual(str(stopped.exception), "Not signed in. Wolt answered a step of the sign-in in a form this tool does not know (KeyError: 'operation_token'). "
+                                                 "Sign in through a browser window instead: login wolt --browser.")
+        self.assertEqual(cli.load_accounts(), {})
 
     def test_tokens_are_kept_for_the_owner_alone(self):
         cli.save_accounts({"wolt": {"refresh_token": "r"}})
