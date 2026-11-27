@@ -3,17 +3,19 @@
 Glovo prices a basket only for a signed-in customer. The service fee, the small-basket surcharge and a store's basket-wide offers are therefore built from the parameters it publishes with each store, and have not been checked against a priced order.
 """
 
-import re
+import json
 import re
 import time
 import unicodedata
-from urllib.parse import quote as urlquote
+from urllib.parse import quote as urlquote, unquote
 from uuid import uuid4
 
 from net import fetch, lapses
 from units import measure, money
 
 API = "https://api.glovoapp.com"
+SITE = "glovoapp.com"
+SIGN_IN_PAGE = "https://glovoapp.com/en/login"
 
 # The header set of Glovo's web client; the API refuses requests that carry less of it.
 STATIC = {
@@ -220,6 +222,17 @@ def store(key, lat, lon):
 
 # --- the shopper's own account ------------------------------------------------
 
+def from_browser(cookies, storage):
+    """The session Glovo's site leaves in a browser signed in to it, or None when the browser holds none.
+
+    The site keeps the refresh token and the device it registered in its local storage, each as JSON, and the access token in a cookie. With no access token the first request made for the account fetches one.
+    """
+    if not storage.get("glovo_refresh_token") or not storage.get("glv_device"):
+        return None
+    access = json.loads(unquote(cookies.get("glovo_auth_info") or "{}")).get("accessToken", "")
+    return {"device_urn": json.loads(storage["glv_device"])["urn"], "access_token": access, "refresh_token": json.loads(storage["glovo_refresh_token"])}
+
+
 def sign_in(ask, tell, lat, lon):
     """Sign in with e-mail and password, the one route Glovo's web client offers that carries no captcha."""
     device = str(uuid4())
@@ -228,10 +241,10 @@ def sign_in(ask, tell, lat, lon):
     email = ask("E-mail address on your Glovo account: ").strip()
     ways = [str(way) for way in fetch(f"{API}/v3/customers/auth/{urlquote(email)}/methods", headers, acting=True)["data"]["authenticationMethods"]]
     if not ways:
-        raise RuntimeError("Glovo knows no account with that e-mail address. An account opened with a phone number has one too: it is under Profile in the app.")
+        raise RuntimeError("Glovo knows no account with that e-mail address. An account opened with a phone number signs in through a browser window: login glovo --browser.")
     if "PASSWORD" not in ways:
         raise RuntimeError(f"That Glovo account signs in with {', '.join(ways)} and has no password. A code sent to a phone carries a captcha this tool "
-                           "does not solve, so give the account a password once: \"Forgot password\" on glovoapp.com with this e-mail address. Then sign in here again.")
+                           "does not solve, so sign in through a browser window instead: login glovo --browser.")
     try:
         reply = fetch(f"{API}/oauth/token", headers, {"grantType": "password", "username": email, "password": ask("Password: ", secret=True)}, acting=True)
     except RuntimeError as refusal:
@@ -239,7 +252,8 @@ def sign_in(ask, tell, lat, lon):
             raise RuntimeError("Glovo did not accept that password.") from refusal
         raise
     if "access" not in reply:
-        raise RuntimeError("Glovo asks for a second step on this sign-in, and that step carries a captcha this tool does not solve.")
+        raise RuntimeError("Glovo asks for a second step on this sign-in, and that step carries a captcha this tool does not solve. "
+                           "Sign in through a browser window instead: login glovo --browser.")
     return {"device_id": device, "device_urn": headers["glovo-device-urn"],
             "access_token": reply["access"]["accessToken"], "refresh_token": reply["access"]["refreshToken"]}
 

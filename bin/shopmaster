@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shop Master: one shopping list priced across delivery platforms, fees included.
 
-A run moves through four commands: `where` fixes the delivery point, `gather` collects the stores, their fee rules and their candidate products for each wanted item, `pick` corrects which candidate stands for an item at a store (`drop` removes a store that does not belong), and `solve` ranks the ways to buy the list. `login` signs in to a platform so that it is read as the shopper's own account.
+A run moves through four commands: `where` fixes the delivery point, `gather` collects the stores, their fee rules and their candidate products for each wanted item, `pick` corrects which candidate stands for an item at a store (`drop` removes a store that does not belong), and `solve` ranks the ways to buy the list. All of it works signed out. `login` signs in to a platform, from the terminal or by hand in a browser window, so that a finished basket is priced as the shopper's own account pays.
 """
 
 import argparse
@@ -9,6 +9,7 @@ import getpass
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 import bolt  # noqa: E402
+import browser  # noqa: E402
 import glovo  # noqa: E402
 import solver  # noqa: E402
 import units  # noqa: E402
@@ -27,6 +29,7 @@ PLATFORMS = {"wolt": wolt, "glovo": glovo, "bolt": bolt}
 POINT_FILE = Path.home() / ".config" / "shop-master" / "point.json"
 RUN_FILE = Path.home() / ".cache" / "shop-master" / "run.json"
 ACCOUNTS_FILE = Path.home() / ".config" / "shop-master" / "accounts.json"
+BROWSER_PROFILE = Path.home() / ".cache" / "shop-master" / "browser"  # exists only while a sign-in through a browser window is under way
 SAMPLE_BASKETS = (1000, 2500, 5000, 10000)
 CANDIDATES = 8   # products kept per item and store
 ALSO_LISTED = 6  # stores named after the chosen ones, for adding by hand
@@ -98,12 +101,36 @@ def describe_account(platform, session, point):
     return f"{platform.title()}: signed in as {found['who']}; {found['plan']}: {'yes' if found['member'] else 'no'}"
 
 
+def through_browser(platform):
+    """Sign in by hand in a browser window, and take over the session the platform's site leaves there.
+
+    The window runs on a profile of its own, apart from the shopper's everyday browser, and the profile is discarded once the session has been read: from then on the session is the tool's, used and renewed like one made in the terminal.
+    """
+    module, name = PLATFORMS[platform], platform.title()
+    if not hasattr(module, "from_browser"):
+        raise RuntimeError(f"{name} signs in from this terminal alone (login {platform}): its site keeps a session in a form this tool does not read.")
+    shutil.rmtree(BROWSER_PROFILE, ignore_errors=True)
+    BROWSER_PROFILE.mkdir(parents=True, mode=0o700)
+    try:
+        print(f"A browser window opens at {name}'s sign-in page. Sign in there in whatever way {name} offers, then close the browser.")
+        browser.window(BROWSER_PROFILE, module.SIGN_IN_PAGE)
+        try:
+            session = module.from_browser(*browser.read(BROWSER_PROFILE, module.SITE))
+        except (ValueError, KeyError, TypeError, AttributeError) as odd:
+            raise RuntimeError(f"{name}'s site kept its session in a form this tool does not know ({type(odd).__name__}), so nothing was taken from the browser.") from odd
+    finally:
+        shutil.rmtree(BROWSER_PROFILE, ignore_errors=True)
+    if not session:
+        raise RuntimeError(f"The browser was closed with no {name} session in it.")
+    return session
+
+
 def login(args):
     point = load(POINT_FILE, "delivery point")
     accounts = load_accounts()
     try:
-        session = PLATFORMS[args.platform].sign_in(lambda prompt, secret=False: getpass.getpass(prompt) if secret else input(prompt),
-                                                   print, point["lat"], point["lon"])
+        session = through_browser(args.platform) if args.browser else PLATFORMS[args.platform].sign_in(
+            lambda prompt, secret=False: getpass.getpass(prompt) if secret else input(prompt), print, point["lat"], point["lon"])
     except RuntimeError as refusal:
         said = getattr(refusal, "reply", None)
         sys.exit(f"Not signed in. {refusal}" + (f"\n{args.platform.title()} said: {said}" if said else ""))
@@ -636,8 +663,10 @@ def main():
     p.add_argument("--closed", action="store_true", help="plan with stores that are closed now")
     p.set_defaults(run=solve)
 
-    p = commands.add_parser("login", help="sign in to a platform, so that prices and offers are your account's own")
+    p = commands.add_parser("login", help="sign in to a platform, so that a finished basket is priced as your account pays; everything else works signed out")
     p.add_argument("platform", choices=list(PLATFORMS))
+    p.add_argument("--browser", action="store_true",
+                   help="sign in by hand in a browser window instead of in this terminal: for an account whose sign-in needs the platform's own page")
     p.set_defaults(run=login)
 
     p = commands.add_parser("logout", help="sign out of a platform and remove its token")

@@ -132,8 +132,8 @@ def _account(path, body=None, headers=None, **params):
 
 
 def sign_in(ask, tell, lat, lon):
-    """Sign in with the phone number and the code Bolt texts to it, the one route its web client offers in Georgia."""
-    session = {"phone_uuid": str(uuid4()), "phone": ask("Phone number of your Bolt account, with its country code (+995…): ").replace(" ", "")}
+    """Sign in with the phone number and the code Bolt texts to it."""
+    session = {"phone_uuid": str(uuid4()), "phone": ask("Phone number of your Bolt account with its country code, starting with +: ").replace(" ", "")}
     step = {"phone_uuid": session["phone_uuid"], "last_known_state": {}}
     try:
         _account("profile/verification/start", {**step, "type": "phone", "phone_number": session["phone"], "method": "sms"})

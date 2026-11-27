@@ -14,6 +14,7 @@ from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
@@ -120,6 +121,17 @@ class Wolt(unittest.TestCase):
         with mock.patch.object(wolt, "fetch", recording({}, [])):
             self.assertEqual(wolt.authorized(session)["authorization"], "Bearer good")
 
+    def test_the_session_wolt_s_site_leaves_in_a_browser_is_taken_from_its_two_cookies(self):
+        # As Wolt's web client writes them: each value JSON, the access token inside an object, both encoded for a cookie.
+        access = token(1800)
+        cookies = {"__wtoken": quote(json.dumps({"accessToken": access, "expirationTime": 1795790000000})), "__wrtoken": quote(json.dumps("refresh-1")), "cwc-consents": "x"}
+        session = wolt.from_browser(cookies, {})
+        self.assertEqual((session["access_token"], session["refresh_token"]), (access, "refresh-1"))
+        self.assertAlmostEqual(session["expires_at"], time.time() + 1800, delta=2)
+        # Without the access token the session is still good: it counts as lapsed, and the first use renews it.
+        self.assertEqual(wolt.from_browser({"__wrtoken": quote(json.dumps("refresh-1"))}, {}), {"refresh_token": "refresh-1", "access_token": "", "expires_at": 0})
+        self.assertIsNone(wolt.from_browser({"cwc-consents": "x"}, {"anything": "1"}))
+
 
 class WoltAccountPricing(unittest.TestCase):
     """The account is asked to price a finished basket and nothing else, and is left alone at the first pushback."""
@@ -212,6 +224,14 @@ class Glovo(unittest.TestCase):
         self.assertEqual(kept[0]["refresh_token"], "r2")
         self.assertNotIn("authorization", visiting)  # shelves and stores are read without the account
 
+    def test_the_session_glovo_s_site_leaves_is_its_stored_refresh_token_and_device(self):
+        # As Glovo's web client writes them: the refresh token and the device in local storage as JSON, the access token in a cookie.
+        storage = {"glovo_refresh_token": json.dumps("refresh-1"), "glv_device": json.dumps({"fingerprintsExpirationTime": 1795790000000, "urn": "glv:device:9"}), "glv_uuid": '"u"'}
+        cookies = {"glovo_auth_info": quote(json.dumps({"accessToken": "aaa.bbb.ccc"}))}
+        self.assertEqual(glovo.from_browser(cookies, storage), {"device_urn": "glv:device:9", "access_token": "aaa.bbb.ccc", "refresh_token": "refresh-1"})
+        self.assertEqual(glovo.from_browser({}, storage)["access_token"], "")
+        self.assertIsNone(glovo.from_browser(cookies, {"glv_device": storage["glv_device"]}))
+
 
 class Bolt(unittest.TestCase):
     def sign_in(self, table, *typed):
@@ -264,6 +284,48 @@ class TokenFile(unittest.TestCase):
         cli.ACCOUNTS_FILE = Path(folder.name) / "accounts.json"
         cli.POINT_FILE = Path(folder.name) / "point.json"
         cli.save(cli.POINT_FILE, {"lat": 41.69, "lon": 44.8, "label": "home"})
+
+    def through_a_browser(self, platform, left):
+        """Run `login PLATFORM --browser` with the browser stood in for. `left` is what the site left in it, as (cookies, storage). Returns (what was said, what the window saw)."""
+        cli.BROWSER_PROFILE = cli.ACCOUNTS_FILE.parent / "browser"
+        cli.PLATFORMS = {"wolt": wolt, "glovo": glovo, "bolt": bolt}
+        seen, out = [], io.StringIO()
+        with contextlib.ExitStack() as held:
+            for module in cli.PLATFORMS.values():
+                held.enter_context(mock.patch.object(module, "ACCOUNT", None))
+            held.enter_context(mock.patch.object(cli.browser, "window", lambda profile, url: seen.append((url, stat.S_IMODE(profile.stat().st_mode)))))
+            held.enter_context(mock.patch.object(cli.browser, "read", lambda profile, site: left))
+            held.enter_context(mock.patch.object(cli, "describe_account", lambda platform, session, point: "(the account, described)"))
+            held.enter_context(contextlib.redirect_stdout(out))
+            try:
+                cli.login(SimpleNamespace(platform=platform, browser=True))
+            except SystemExit as stopped:
+                return str(stopped), seen
+        return out.getvalue(), seen
+
+    def test_signing_in_through_a_browser_takes_over_the_session_and_discards_the_profile(self):
+        said, seen = self.through_a_browser("wolt", ({"__wtoken": quote(json.dumps({"accessToken": "a.b.c"})), "__wrtoken": quote(json.dumps("refresh-1"))}, {}))
+        self.assertEqual(seen, [("https://wolt.com/en/login", 0o700)])
+        self.assertEqual(cli.load_accounts()["wolt"]["refresh_token"], "refresh-1")
+        self.assertFalse(cli.BROWSER_PROFILE.exists())
+        self.assertIn("then close the browser", said)
+        self.assertIn("Signed in.", said)
+
+    def test_a_browser_closed_without_a_session_signs_nothing_in(self):
+        said, _ = self.through_a_browser("glovo", ({"other": "1"}, {}))
+        self.assertEqual(said, "Not signed in. The browser was closed with no Glovo session in it.")
+        self.assertEqual(cli.load_accounts(), {})
+        self.assertFalse(cli.BROWSER_PROFILE.exists())
+
+    def test_a_session_kept_in_an_unknown_form_is_refused_and_said(self):
+        said, _ = self.through_a_browser("wolt", ({"__wrtoken": "not-json"}, {}))
+        self.assertEqual(said, "Not signed in. Wolt's site kept its session in a form this tool does not know (JSONDecodeError), so nothing was taken from the browser.")
+        self.assertFalse(cli.BROWSER_PROFILE.exists())
+
+    def test_bolt_signs_in_from_the_terminal_alone(self):
+        said, seen = self.through_a_browser("bolt", ({}, {}))
+        self.assertIn("Bolt signs in from this terminal alone (login bolt)", said)
+        self.assertEqual(seen, [])
 
     def test_tokens_are_kept_for_the_owner_alone(self):
         cli.save_accounts({"wolt": {"refresh_token": "r"}})

@@ -3,17 +3,20 @@
 Wolt prices any basket for an anonymous visitor, so a store's fees are read from Wolt's own arithmetic, and a finished basket can be priced exactly, the store's standing offers included. Signed in, the same pricing is the account's own.
 """
 
+import json
 import re
 import time
 from math import floor
-from urllib.parse import parse_qs, quote as urlquote, urlsplit
+from urllib.parse import parse_qs, quote as urlquote, unquote, urlsplit
 from uuid import uuid4
 
-from net import fetch
+from net import fetch, lapses
 from units import measure
 
 SEARCH = "https://restaurant-api.wolt.com/v1/pages/search"
 AUTH = "https://authentication.wolt.com"
+SITE = "wolt.com"
+SIGN_IN_PAGE = "https://wolt.com/en/login"
 ORDER_XP = "https://consumer-api.wolt.com/order-xp/web"
 ASSORTMENT = "https://consumer-api.wolt.com/consumer-api/consumer-assortment/v1/venues/slug"
 
@@ -355,17 +358,29 @@ def _session(reply):
     return {"refresh_token": reply["refresh_token"], "access_token": reply["access_token"], "expires_at": time.time() + reply.get("expires_in", 0)}
 
 
+def from_browser(cookies, storage):
+    """The session Wolt's site leaves in a browser signed in to it, or None when the browser holds none.
+
+    The site keeps its two tokens in cookies, each written as JSON: the access token inside an object, the refresh token as a string.
+    """
+    if not cookies.get("__wrtoken"):
+        return None
+    access = json.loads(unquote(cookies.get("__wtoken") or "{}")).get("accessToken", "")
+    return {"refresh_token": json.loads(unquote(cookies["__wrtoken"])), "access_token": access, "expires_at": lapses(access)}
+
+
 def sign_in(ask, tell, lat, lon):
     """Sign in with a code Wolt texts, or with the link it e-mails.
 
     Wolt decides at each attempt whether a texted code needs a captcha first. Asking for the e-mailed link always carries one, so the shopper asks for it at wolt.com; redeeming it is a plain call.
     """
-    phone = ask("Your Wolt phone number with its country code (+995…), or Enter to use a link Wolt e-mails instead: ").replace(" ", "")
+    phone = ask("Your Wolt phone number with its country code, starting with +, or Enter to use a link Wolt e-mails instead: ").replace(" ", "")
     if phone:
         asked = fetch(f"{AUTH}/v1/captcha/site_key", HEADERS, {"phone_number": phone, "operation": "start_phone_number_authentication_consumer"}, acting=True)
         if asked.get("site_key"):
             raise RuntimeError("Wolt asked for a captcha before texting the code, which this tool does not solve. "
-                               "Run this again and press Enter at the phone number to sign in with an e-mailed link.")
+                               "Sign in through a browser window instead (login wolt --browser), or run this again and press Enter at the phone number "
+                               "to sign in with an e-mailed link.")
         fetch(f"{AUTH}/v2/wauth2/consumer-sms/start-phone-number-authentication", HEADERS,
               {"phone_number": phone, "message_delivery_method": "sms", "operation_token": asked["operation_token"]}, acting=True)
         grant = {"grant_type": "phone_number_otp", "phone_number": phone, "otp": ask("Code from Wolt's SMS: ").strip(), "tenant": "wolt"}
