@@ -247,50 +247,6 @@ class Glovo(unittest.TestCase):
         self.assertIsNone(glovo.from_browser(cookies, {"glv_device": storage["glv_device"]}))
 
 
-class Bolt(unittest.TestCase):
-    def sign_in(self, table, *typed):
-        calls = []
-        with mock.patch.object(bolt, "fetch", recording(table, calls)):
-            return bolt.sign_in(answers(*typed), lambda text: None, *POINT), calls
-
-    def ok(self, data):
-        return {"code": 0, "message": "OK", "data": data}
-
-    def test_the_texted_code_completes_the_sign_in(self):
-        table = {"verification/start": self.ok({"state": "pending_phone_verification"}),
-                 "verification/confirm": self.ok({"state": "complete", "auth": {"auth_username": "user-1"}})}
-        session, calls = self.sign_in(table, "+995 555 12 34 56", " 4321 ")
-        self.assertEqual((session["phone"], session["auth_username"]), ("+995555123456", "user-1"))
-        self.assertEqual(calls[0][2]["phone_number"], "+995555123456")
-        self.assertEqual({k: calls[1][2][k] for k in ("code", "type", "phone_uuid")}, {"code": "4321", "type": "phone", "phone_uuid": session["phone_uuid"]})
-
-    def test_two_step_accounts_take_a_second_code_by_e_mail(self):
-        states = iter([self.ok({"state": "pending_second_factor"}), self.ok({"state": "complete", "auth": {"auth_username": "user-1"}})])
-        table = {"verification/start": self.ok({}), "verification/confirm": lambda body: next(states)}
-        session, calls = self.sign_in(table, "+995555123456", "1111", "2222")
-        self.assertEqual([(call[2].get("type"), call[2].get("code")) for call in calls], [("phone", None), ("phone", "1111"), ("email", None), ("email", "2222")])
-        self.assertEqual(session["auth_username"], "user-1")
-
-    def test_a_captcha_demand_and_an_unfinished_account_stop_with_the_reason(self):
-        with self.assertRaisesRegex(RuntimeError, "asked for a captcha"):
-            self.sign_in({"verification/start": {"code": 1, "message": "REQUIRED_BOT_CHALLENGE"}}, "+995555123456")
-        table = {"verification/start": self.ok({}), "verification/confirm": self.ok({"state": "pending_signup"})}
-        with self.assertRaisesRegex(RuntimeError, "pending_signup"):
-            self.sign_in(table, "+995555123456", "1111")
-
-    def test_the_lasting_credential_buys_a_refresh_token_and_that_an_access_token(self):
-        session, calls, kept = {"auth_username": "user-1", "phone_uuid": "device-1"}, [], []
-        fresh = token(900)
-        table = {"auth/authenticate": self.ok({"refresh_token": "r1"}), "auth/getAccessTokenWithRotation": self.ok({"access_token": fresh, "refresh_token": "r2"})}
-        with mock.patch.object(bolt, "fetch", recording(table, calls)), mock.patch.object(bolt, "keep", lambda: kept.append(dict(session))):
-            headers = bolt.authorized(session)
-        self.assertEqual(headers, {"authorization": f"Bearer {fresh}"})
-        self.assertEqual(calls[0][1]["authorization"], "Basic " + base64.b64encode(b"user-1:device-1").decode())
-        self.assertEqual(calls[1][1]["authorization"], "Bearer r1")
-        self.assertEqual(session["refresh_token"], "r2")
-        self.assertEqual(len(kept), 2)
-
-
 class TokenFile(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
@@ -306,7 +262,7 @@ class TokenFile(unittest.TestCase):
         seen, out = [], io.StringIO()
         with contextlib.ExitStack() as held:
             for module in cli.PLATFORMS.values():
-                held.enter_context(mock.patch.object(module, "ACCOUNT", None))
+                held.enter_context(mock.patch.object(module, "ACCOUNT", None, create=True))
             held.enter_context(mock.patch.object(cli.browser, "window", lambda profile, url: seen.append((url, stat.S_IMODE(profile.stat().st_mode)))))
             held.enter_context(mock.patch.object(cli.browser, "read", lambda profile, site: left))
             held.enter_context(mock.patch.object(cli, "describe_account", lambda platform, session, point: "(the account, described)"))
@@ -336,10 +292,19 @@ class TokenFile(unittest.TestCase):
         self.assertEqual(said, "Not signed in. Wolt's site kept its session in a form this tool does not know (JSONDecodeError), so nothing was taken from the browser.")
         self.assertFalse(cli.BROWSER_PROFILE.exists())
 
-    def test_bolt_signs_in_from_the_terminal_alone(self):
-        said, seen = self.through_a_browser("bolt", ({}, {}))
-        self.assertIn("Bolt signs in from this terminal alone (login bolt)", said)
-        self.assertEqual(seen, [])
+    def test_bolt_is_read_signed_out_only_and_says_why_without_asking_bolt_anything(self):
+        asked = []
+        for through_browser in (True, False):
+            with mock.patch.object(bolt, "fetch", lambda *call, **more: asked.append(call)), mock.patch.object(cli, "PLATFORMS", {"bolt": bolt}), \
+                    self.assertRaises(SystemExit) as stopped:
+                cli.login(SimpleNamespace(platform="bolt", browser=through_browser))
+            self.assertIn("Its fraud protection refused a sign-in from this tool on a real account", str(stopped.exception))
+        self.assertEqual(asked, [])
+        self.assertFalse(hasattr(bolt, "sign_in"))
+
+    def test_a_sign_in_records_how_it_was_made(self):
+        self.through_a_browser("wolt", ({"__wtoken": quote(json.dumps({"accessToken": "a.b.c"})), "__wrtoken": quote(json.dumps("refresh-1"))}, {}))
+        self.assertEqual(cli.load_accounts()["wolt"]["via"], "a browser window")
 
     def test_tokens_are_kept_for_the_owner_alone(self):
         cli.save_accounts({"wolt": {"refresh_token": "r"}})
@@ -352,14 +317,15 @@ class TokenFile(unittest.TestCase):
         def unreadable(session, lat, lon):
             raise RuntimeError("beta.example.test/me answered 401")
         cli.PLATFORMS = {"alpha": SimpleNamespace(whoami=lambda session, lat, lon: {"who": "Nino", "member": True, "plan": "Alpha Plus"}),
-                         "beta": SimpleNamespace(whoami=unreadable), "gamma": SimpleNamespace()}
+                         "beta": SimpleNamespace(whoami=unreadable), "gamma": SimpleNamespace(), "delta": SimpleNamespace(NO_SIGN_IN="Delta refuses.")}
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.account(SimpleNamespace())
         self.assertEqual(out.getvalue().splitlines(), [
             "Alpha: signed in as Nino; Alpha Plus: yes",
             "Beta: signed in, but the account could not be read (beta.example.test/me answered 401)",
-            "Gamma: not signed in"])
+            "Gamma: not signed in",
+            "Delta: read signed out only"])
 
 
 class Lapses(unittest.TestCase):

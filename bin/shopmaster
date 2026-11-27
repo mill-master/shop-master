@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shop Master: one shopping list priced across delivery platforms, fees included.
 
-A run moves through four commands: `where` fixes the delivery point, `gather` collects the stores, their fee rules and their candidate products for each wanted item, `pick` corrects which candidate stands for an item at a store (`drop` removes a store that does not belong), and `solve` ranks the ways to buy the list. All of it works signed out. `login` signs in to a platform, from the terminal or by hand in a browser window, so that a finished basket is priced as the shopper's own account pays.
+A run moves through four commands: `where` fixes the delivery point, `gather` collects the stores, their fee rules and their candidate products for each wanted item, `pick` corrects which candidate stands for an item at a store (`drop` removes a store that does not belong), and `solve` ranks the ways to buy the list. All of it works signed out. `login` signs in to a platform, from the terminal or by hand in a browser window, and the shopper then chooses for each run whether it uses the account, in which case a finished basket is priced as that account pays.
 """
 
 import argparse
@@ -34,7 +34,7 @@ SAMPLE_AROUND = (0.4, 1, 2, 4)  # basket sizes at which a store's fees are shown
 CANDIDATES = 8   # products kept per item and store
 ALSO_LISTED = 6  # stores named after the chosen ones, for adding by hand
 ROUNDS = 3       # times a closed or unreadable store is replaced by the next in the ranking
-RUN_SHAPE = 2    # raised whenever what a run records changes meaning, so that an older run is gathered afresh instead of misread
+RUN_SHAPE = 3    # raised whenever what a run records changes meaning, so that an older run is gathered afresh instead of misread
 
 
 def money(amount):
@@ -107,8 +107,6 @@ def through_browser(platform):
     The window runs on a profile of its own, apart from the shopper's everyday browser, and the profile is discarded once the session has been read: from then on the session is the tool's, used and renewed like one made in the terminal.
     """
     module, name = PLATFORMS[platform], platform.title()
-    if not hasattr(module, "from_browser"):
-        raise RuntimeError(f"{name} signs in from this terminal alone (login {platform}): its site keeps a session in a form this tool does not read.")
     shutil.rmtree(BROWSER_PROFILE, ignore_errors=True)
     BROWSER_PROFILE.mkdir(parents=True, mode=0o700)
     try:
@@ -126,6 +124,8 @@ def through_browser(platform):
 
 
 def login(args):
+    if getattr(PLATFORMS[args.platform], "NO_SIGN_IN", None):
+        sys.exit(PLATFORMS[args.platform].NO_SIGN_IN)
     point = load(POINT_FILE, "delivery point")
     accounts = load_accounts()
     try:
@@ -134,6 +134,7 @@ def login(args):
     except RuntimeError as refusal:
         said = getattr(refusal, "reply", None)
         sys.exit(f"Not signed in. {refusal}" + (f"\n{args.platform.title()} said: {said}" if said else ""))
+    session["via"] = "a browser window" if args.browser else "the terminal"
     accounts[args.platform] = PLATFORMS[args.platform].ACCOUNT = session
     save_accounts(accounts)
     print(f"Signed in. The token is kept in {ACCOUNTS_FILE}, which only you can read; `logout {args.platform}` removes it.")
@@ -154,8 +155,40 @@ def logout(args):
 
 def account(args):
     point, accounts = load(POINT_FILE, "delivery point"), load_accounts()
-    for platform in PLATFORMS:
-        print(describe_account(platform, accounts[platform], point) if platform in accounts else f"{platform.title()}: not signed in")
+    for platform, module in PLATFORMS.items():
+        print(describe_account(platform, accounts[platform], point) if platform in accounts
+              else f"{platform.title()}: read signed out only" if getattr(module, "NO_SIGN_IN", None) else f"{platform.title()}: not signed in")
+
+
+def describe_ways(accounts):
+    """What a shopper chooses between before a run, in the words put to them. It asks no platform anything."""
+    if not accounts:
+        return ("No platform is signed in, so this request can only be run signed out (--signed-out). Every total is then a non-member's, so a membership's discount is not in it, "
+                "and no cart is filled.\nTo use an account the shopper signs in first, in their own terminal: `login wolt` or `login glovo` there, "
+                "or with --browser by hand in a browser window. A run made with --signed-in then has Wolt price each basket as their account pays.")
+    held = " and ".join(f"{name.title()} (through {session['via']})" if session.get("via") else name.title() for name, session in accounts.items())
+    pricing = [name.title() for name in accounts if hasattr(PLATFORMS[name], "quote")]
+    gain = (f"{' and '.join(pricing)} prices each basket as their account pays, membership and personal offers included. Totals on the other platforms are a non-member's either way."
+            if pricing else "no total changes yet: on the platforms signed in, a basket is not priced for the account.")
+    return (f"Signed in to {held}. The shopper chooses how this request is run:\n"
+            f"  --signed-in   {gain}\n"
+            "  --signed-out  nothing is asked in their name. Every total is a non-member's, so a membership's discount is not in it.\n"
+            "Searches and shelves are read signed out in both, and no cart is filled in either: the shopper checks out in the app.")
+
+
+def chosen_way(args, run, accounts):
+    """Whether this run uses the shopper's signed-in accounts. It is their choice for every run, so a run is not gathered until it has been made."""
+    choice = args.signed_in
+    if choice is None and args.add:
+        return run["signed_in"]
+    if choice is None:
+        print(describe_ways(accounts))
+        if not sys.stdin.isatty():
+            sys.exit("Put this choice to the shopper, then run gather again with --signed-in or --signed-out.")
+        choice = input("Run this request signed in or signed out? [in/out]: ").strip().lower() in ("in", "signed in")
+    if choice and not accounts:
+        sys.exit("No platform is signed in, so this run cannot be made signed in. The shopper signs in first, or the run is made with --signed-out.")
+    return choice
 
 
 # --- where -----------------------------------------------------------------
@@ -245,6 +278,7 @@ def gather(args):
         run["extended"] = now()
     else:
         run = {"shape": RUN_SHAPE, "at": now(), "point": point, "food": args.food, "wants": {}, "stores": {}, "picks": {}, "unread": {}, "issued": {}}
+    run["signed_in"] = chosen_way(args, run, load_accounts())
     food = run["food"]
     fresh_wants = []
     for spec in args.want:
@@ -439,7 +473,7 @@ def sample_baskets(store):
 
 def describe_run(run):
     when = f"gathered {run['at']}" + (f", extended {run['extended']}" if run.get("extended") else "")
-    return f"Run {when} for {run['point']['label'] or 'the saved point'}"
+    return f"Run {when} for {run['point']['label'] or 'the saved point'}, {'signed in' if run['signed_in'] else 'signed out'}"
 
 
 def show_run(run, only=None):
@@ -567,6 +601,9 @@ def price_exactly(run, plan, lines, quotes):
 
 def solve(args):
     run = load_run()
+    if not run["signed_in"]:
+        for module in PLATFORMS.values():
+            module.ACCOUNT = None  # the shopper chose a run in which nothing is asked in their name
     stores, lines, skipped = [], {}, []
     for ref, store in run["stores"].items():
         if not store["open"] and not args.closed:
@@ -661,6 +698,10 @@ def main():
     p.add_argument("--platform", help="comma-separated platforms to use (default: all)")
     p.add_argument("--closed", action="store_true", help="also take stores that are closed now")
     p.add_argument("--add", action="store_true", help="extend the current run with more items or stores, and retry what failed")
+    way = p.add_mutually_exclusive_group()
+    way.add_argument("--signed-in", dest="signed_in", action="store_const", const=True,
+                     help="the shopper chose to use their signed-in accounts for this run; without either choice a new run is not gathered, and says what to ask them")
+    way.add_argument("--signed-out", dest="signed_in", action="store_const", const=False, help="the shopper chose a run in which nothing is asked in their name")
     p.set_defaults(run=gather)
 
     p = commands.add_parser("show", help="print the current run")
@@ -681,7 +722,7 @@ def main():
     p.add_argument("--closed", action="store_true", help="plan with stores that are closed now")
     p.set_defaults(run=solve)
 
-    p = commands.add_parser("login", help="sign in to a platform, so that a finished basket is priced as your account pays; everything else works signed out")
+    p = commands.add_parser("login", help="sign in to a platform, so that a run you choose to make signed in prices a finished basket as your account pays")
     p.add_argument("platform", choices=list(PLATFORMS))
     p.add_argument("--browser", action="store_true",
                    help="sign in by hand in a browser window instead of in this terminal: for an account whose sign-in needs the platform's own page")

@@ -7,6 +7,7 @@ from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
@@ -35,7 +36,7 @@ def store(platform, name, offers, delivery=250, minimum=2500, **extra):
 
 def sample_run():
     return {
-        "shape": cli.RUN_SHAPE, "at": "2026-11-27T03:00+04:00", "food": False, "point": {"lat": 41.69, "lon": 44.8, "label": "home"},
+        "shape": cli.RUN_SHAPE, "at": "2026-11-27T03:00+04:00", "food": False, "signed_in": False, "point": {"lat": 41.69, "lon": 44.8, "label": "home"},
         "picks": {}, "unread": {}, "issued": {"alpha": 1, "beta": 1},
         "wants": {"milk": {"count": 1, "queries": ["milk"]}, "eggs": {"count": 1, "queries": ["eggs"]}, "rice": {"count": 2, "queries": ["rice"]}},
         "stores": {
@@ -136,6 +137,21 @@ class Cli(unittest.TestCase):
         self.assertIn("! rice: 8 wanted, and the store shows 3 as the most one order can take", self.solve())
         quiet(cli.pick, picks=["b1.rice=1x3"])
         self.assertNotIn("the most one order can take", self.solve())
+
+    def test_a_run_made_signed_out_asks_nothing_in_the_shopper_s_name_though_they_are_signed_in(self):
+        priced_for = []
+
+        def quote(store, lines, lat, lon):
+            priced_for.append(cli.PLATFORMS["beta"].ACCOUNT)
+            return {"goods": None, "fees": [("Delivery", 250)], "offers": [], "mine": bool(cli.PLATFORMS["beta"].ACCOUNT), "note": None}
+        cli.PLATFORMS = {"alpha": SimpleNamespace(), "beta": SimpleNamespace(ACCOUNT={"token": "t"}, quote=quote)}
+        self.assertIn("for home, signed out; amounts in GEL", self.solve())
+        self.assertEqual(set(map(type, priced_for)), {type(None)})
+        cli.PLATFORMS["beta"].ACCOUNT = {"token": "t"}
+        self.change(lambda run: run.update(signed_in=True))
+        report = self.solve()
+        self.assertIn("for home, signed in; amounts in GEL", report)
+        self.assertIn("(priced by Beta for your account)", report)
 
     def test_a_run_kept_by_another_version_is_gathered_afresh(self):
         self.change(lambda run: run.update(shape=1))
@@ -258,6 +274,7 @@ class Gather(unittest.TestCase):
         cli.RUN_FILE = Path(folder.name) / "run.json"
         cli.POINT_FILE = Path(folder.name) / "point.json"
         cli.save(cli.POINT_FILE, {"lat": 41.69, "lon": 44.8, "label": "home"})
+        cli.ACCOUNTS_FILE = Path(folder.name) / "accounts.json"  # no one is signed in, and the shopper's own file is left alone
         self.shelves = {
             "full": {"milk": [("Milk 1L", 550)], "eggs": [("Eggs 10", 600)], "kvertskhi": [("Eggs 15", 850)]},
             "half": {"milk": [("Milk 1L", 500)]},
@@ -266,9 +283,17 @@ class Gather(unittest.TestCase):
         cli.PLATFORMS = {"shop": shop(self.shelves)}
 
     def gather(self, *wants, **options):
-        defaults = {"want": list(wants), "food": False, "store": [], "per_platform": 1, "platform": None, "closed": False, "add": False}
+        defaults = {"want": list(wants), "food": False, "store": [], "per_platform": 1, "platform": None, "closed": False, "add": False, "signed_in": False}
         report = quiet(cli.gather, **{**defaults, **options})
         return report, cli.load(cli.RUN_FILE, "run")
+
+    def refused(self, *wants, **options):
+        """A gather that stops before gathering: (what it printed, what it stopped with)."""
+        defaults = {"want": list(wants), "food": False, "store": [], "per_platform": 1, "platform": None, "closed": False, "add": False, "signed_in": None}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as stopped:
+            cli.gather(SimpleNamespace(**{**defaults, **options}))
+        return out.getvalue(), str(stopped.exception)
 
     def stores(self, run):
         return {ref: record["key"] for ref, record in run["stores"].items()}
@@ -290,6 +315,39 @@ class Gather(unittest.TestCase):
         self.assertIn("! shop: Full is closed (Opens at 09:00) and was passed over", report)
         _, run = self.gather("milk", "eggs", closed=True)
         self.assertEqual(self.stores(run), {"s1": "full"})
+
+    def test_a_run_is_not_gathered_until_the_shopper_has_chosen_how_it_is_made(self):
+        searched = []
+        searches = shop(self.shelves)
+        cli.PLATFORMS = {"shop": SimpleNamespace(discover=lambda *call: searched.append(call) or searches.discover(*call), store=searches.store, shelf=searches.shelf)}
+        said, stopped = self.refused("milk")
+        self.assertIn("Put this choice to the shopper, then run gather again with --signed-in or --signed-out.", stopped)
+        self.assertIn("No platform is signed in, so this request can only be run signed out (--signed-out).", said)
+        self.assertIn("a membership's discount is not in it, and no cart is filled", said)
+        _, stopped = self.refused("milk", signed_in=True)
+        self.assertIn("No platform is signed in, so this run cannot be made signed in.", stopped)
+        self.assertEqual(searched, [])
+
+    def test_a_signed_in_shopper_is_told_what_each_way_changes(self):
+        cli.save_accounts({"shop": {"token": "t", "via": "a browser window"}, "other": {"token": "t", "via": "the terminal"}})
+        searches = shop(self.shelves)
+        cli.PLATFORMS = {"shop": SimpleNamespace(discover=searches.discover, store=searches.store, shelf=searches.shelf, quote=None), "other": SimpleNamespace(discover=lambda *call: [])}
+        said, _ = self.refused("milk")
+        self.assertIn("Signed in to Shop (through a browser window) and Other (through the terminal). The shopper chooses how this request is run:", said)
+        self.assertIn("--signed-in   Shop prices each basket as their account pays, membership and personal offers included.", said)
+        self.assertIn("--signed-out  nothing is asked in their name. Every total is a non-member's, so a membership's discount is not in it.", said)
+        self.assertIn("no cart is filled in either", said)
+        report, run = self.gather("milk", signed_in=True)
+        self.assertTrue(run["signed_in"])
+        self.assertIn("for home, signed in (stores)", report)
+        _, run = self.gather("eggs", add=True, signed_in=None)  # more of the same run is gathered the way the run was chosen
+        self.assertTrue(run["signed_in"])
+
+    def test_at_a_terminal_the_tool_asks_the_person_itself(self):
+        with mock.patch.object(cli.sys.stdin, "isatty", lambda: True, create=True), mock.patch("builtins.input", lambda prompt: "out"):
+            report, run = self.gather("milk", signed_in=None)
+        self.assertFalse(run["signed_in"])
+        self.assertIn("for home, signed out (stores)", report)
 
     def test_a_platform_that_is_not_at_this_point_says_so_once(self):
         def nowhere(query, lat, lon, food):
