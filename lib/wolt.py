@@ -189,8 +189,8 @@ def quote(store, lines, lat, lon):
     if session:
         try:
             rows = _checkout(store, items, lat, lon, session)["checkout_rows"]
-        except RuntimeError as pushback:
-            session, note = None, _rest(ACCOUNT, pushback)
+        except RuntimeError as answer:
+            session, note = None, _rest(ACCOUNT, answer)
     if not session:
         rows = _checkout(store, items, lat, lon)["checkout_rows"]
     priced = {"goods": None, "fees": [], "offers": [row["label"] for row in rows if row.get("template") == "discount_row"], "mine": bool(session), "note": note}
@@ -356,7 +356,7 @@ def store(key, lat, lon):
 
 # --- the shopper's own account ------------------------------------------------
 #
-# The account is used for as little as possible: reading shelves and stores stays anonymous, and only the pricing of a finished basket, the account's own status and signing in are done in its name. At the first pushback it is left alone.
+# The account is used for as little as possible: reading shelves and stores stays anonymous, and only the pricing of a finished basket, the account's own status and signing in are done in its name. At the first throttle (429) or refusal (401, 403) it is left alone.
 
 REST_AFTER_THROTTLE = 3600  # seconds an account is left alone after Wolt throttles a request made for it
 
@@ -433,15 +433,15 @@ def authorized(session):
     return {**HEADERS, "authorization": f"Bearer {session['access_token']}"}
 
 
-def _rest(session, pushback):
-    """Leave the account alone after a pushback, and say why. Returns the sentence for the shopper."""
-    status = getattr(pushback, "status", None)
+def _rest(session, answer):
+    """Leave the account alone after a throttle or a refusal, and say why. Returns the sentence for the shopper."""
+    status = getattr(answer, "status", None)
     if status == 429:
         session["resting"] = {"until": time.time() + REST_AFTER_THROTTLE, "why": "Wolt throttled a request made for your account"}
     elif status in (401, 403):
         session["resting"] = {"until": None, "why": "Wolt refused a request made for your account"}
     else:
-        return f"pricing for your account failed ({pushback}), so this basket is priced as for any visitor"
+        return f"pricing for your account failed ({answer}), so this basket is priced as for any visitor"
     keep()
     return session["resting"]["why"] + ", so this basket is priced as for any visitor and your account is left alone"
 

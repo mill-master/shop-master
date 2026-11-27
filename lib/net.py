@@ -19,7 +19,7 @@ except ImportError:  # Windows has no file locks of this kind; there the pacing 
 
 # Seconds between two requests to one host. One a second is well under what the platforms' own pages send while loading; at three a second Glovo answered 429 in most gathers.
 GAP = 1.0
-# A request made for a signed-in account keeps a wider berth, and is made once: the first pushback is taken as the answer.
+# A request made for a signed-in account keeps a wider berth, and is made once: the first throttle or refusal is taken as the answer.
 ACCOUNT_GAP = 3.0
 # The most one host is asked in an hour, and the most of that for a signed-in account. They are this tool's own restraint; no platform publishes a figure.
 # One comparison asks a host some 60 to 100 times. Glovo began answering 429 to requests a second apart after a day in which it was asked several hundred times an hour.

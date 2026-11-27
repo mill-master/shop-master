@@ -92,7 +92,7 @@ def save_accounts(accounts):
 def describe_account(platform, session, point):
     resting = session.get("resting")
     if resting and (resting["until"] is None or resting["until"] > time.time()):
-        # After a pushback the account is not asked anything, its own status included.
+        # After a throttle or a refusal the account is not asked anything, its own status included.
         until = "you sign in again" if resting["until"] is None else datetime.fromtimestamp(resting["until"]).strftime("%H:%M")
         return f"{platform.title()}: signed in, and left alone until {until} ({resting['why']})"
     found, error = attempt(PLATFORMS[platform].whoami, session, point["lat"], point["lon"])

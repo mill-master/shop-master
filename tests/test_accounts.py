@@ -134,7 +134,7 @@ class Wolt(unittest.TestCase):
 
 
 class WoltAccountPricing(unittest.TestCase):
-    """The account is asked to price a finished basket and nothing else, and is left alone at the first pushback."""
+    """The account is asked to price a finished basket and nothing else, and is left alone at the first throttle or refusal."""
 
     STORE = {"venue_id": "v", "currency": "GEL", "country": "GEO", "scale": 1, "offer_ids": ["everyone"], "every_offer_id": ["everyone", "members"]}
     ROWS = {"checkout_rows": [{"template": "amount_row", "label": "Item subtotal", "amount": {"amount": 500}}]}
