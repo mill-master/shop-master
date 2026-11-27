@@ -4,7 +4,9 @@ Glovo prices a basket only for a signed-in customer. The service fee, the small-
 """
 
 import re
+import re
 import time
+import unicodedata
 from urllib.parse import quote as urlquote
 from uuid import uuid4
 
@@ -128,11 +130,14 @@ def shelf(store, query, lat, lon, limit=8):
     offers = []
     for group in reply.get("results", []):
         for product in group.get("products", []):
+            # A dish with choices to make shows its base price; the cheapest obligatory choices are added to it.
+            added = sum(sum(sorted(_minor(choice.get("priceImpact") or 0) for choice in choices.get("attributes") or [])[: choices.get("min") or 0])
+                        for choices in product.get("attributeGroups") or [])
             offer = {
                 "id": str(product["id"]),
                 "name": product["name"].strip(),
-                "price": _minor(product["price"]),
-                "list": _minor(product["price"]),
+                "price": _minor(product["price"]) + added,
+                "list": _minor(product["price"]) + added,
                 # Glovo gives no size apart from the name, and does not mark goods sold by weight.
                 "size": measure(product["name"]),
                 "from": bool(product.get("attributeGroups")),
@@ -140,7 +145,7 @@ def shelf(store, query, lat, lon, limit=8):
             }
             promotion = product.get("promotion") or {}
             if promotion.get("price") and not promotion.get("isPrime"):
-                offer["price"] = _minor(promotion["price"])
+                offer["price"] = _minor(promotion["price"]) + added
             elif promotion:
                 extra = f"offer: {promotion.get('title')}" + (" (Prime members)" if promotion.get("isPrime") else "")
                 offer["note"] = f"{extra}. {offer['note']}" if offer["note"] else extra
@@ -178,7 +183,10 @@ def store(key, lat, lon):
     info = fetch(f"{API}/v3/stores/{urlquote(key)}?includeClosed=true&includeDisabled=false", headers)
     surcharges = fetch(f"{API}/v1/stores/{info['id']}/addresses/{info['addressId']}/node/store_fees", headers)["data"]["ranges"]
     found = place(lat, lon)
-    city = found["addressComponents"]["administrative_area_level_1"].lower()
+    # The city as Glovo's page addresses spell it: "T'bilisi" is tbilisi, "Barcelona" barcelona. Under another name the store's page still opens, reduced.
+    named = found["addressComponents"].get("locality") or found["cityCode"]
+    plain = unicodedata.normalize("NFKD", named).encode("ascii", "ignore").decode().replace("'", "")
+    city = re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-")
     fees = schedule(info["deliveryFeeInfo"]["fee"], info.get("serviceFeeInfo"), surcharges)
     notes = []
     for offer in info.get("promotions", []):

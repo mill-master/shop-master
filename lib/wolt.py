@@ -92,6 +92,10 @@ def shelf(store, query, lat, lon, limit=8):
     """
     reply = fetch(f"{ASSORTMENT}/{store['key']}/assortment/items/search?language=en", HEADERS, {"q": query})
     definitions = {option["id"]: option for option in reply.get("options", [])}
+    shelves = {}
+    for category in reply.get("categories", []):
+        for item_id in category.get("item_ids") or []:
+            shelves.setdefault(item_id, []).append(category["id"])
     offers = []
     for item in reply.get("items", []):
         if item.get("disabled_info") or item.get("purchasable_balance") == 0:
@@ -105,6 +109,7 @@ def shelf(store, query, lat, lon, limit=8):
             # The name is what the shopper reads, and some stores' size labels belong to another product.
             "size": measure(item["name"]) or measure(item.get("unit_info")),
             "stock": item.get("purchasable_balance"),
+            "limit": item.get("max_quantity_per_purchase"),
             "note": (item.get("description") or "").strip() or None,
         }
         by_weight = item.get("sell_by_weight_config")
@@ -121,12 +126,19 @@ def shelf(store, query, lat, lon, limit=8):
             offer["from"] = True
             if added:
                 offer.update(extra=added, choices=stated, price=offer["price"] + added, list=offer["list"] + added)
-        cut = store["item_offers"].get(item["id"])
-        if cut and cut[1] <= 1:
-            # A store campaign on this product. The shelf shows the price before it; checkout takes it off.
-            offer["price"] -= _half_up(offer["price"] * cut[0])
-        elif cut:
-            offer["bulk"] = [cut[1], cut[0]]
+        # A store campaign on this product, or on a shelf category it sits in. The shelf shows the price before it; checkout takes it off each unit.
+        on_shelves = shelves.get(item["id"], [])
+        named = next((category for category in on_shelves if category in store["category_offers"]), None)
+        cut = store["item_offers"].get(item["id"]) or store["category_offers"].get(named)
+        if on_shelves:
+            offer["category"] = named or on_shelves[0]  # checkout matches category campaigns on this
+        if cut:
+            subject = offer["price"] - (added or 0) if cut["base_only"] else offer["price"]
+            off = _half_up(subject * cut["fraction"]) if cut["fraction"] else min(subject, cut["amount"])
+            if cut["units"] <= 1:
+                offer["price"] -= off
+            else:
+                offer["bulk"] = [cut["units"], off]
         offers.append(offer)
         if len(offers) == limit:
             break
@@ -161,6 +173,8 @@ def quote(store, lines, lat, lon):
             items.append({"id": offer["id"], "count": 1, "base_price": each * count, "end_amount": each * count, "is_weighted_item": True})
         else:
             items.append({"id": offer["id"], "count": count, "base_price": offer["base"], "end_amount": each * count, "options": offer.get("choices", [])})
+        if offer.get("category"):
+            items[-1]["category_id"] = offer["category"]
     resting = (ACCOUNT or {}).get("resting")
     if resting and resting["until"] and resting["until"] < time.time():
         del ACCOUNT["resting"]
@@ -196,15 +210,18 @@ def audience(offer):
     return None
 
 
-def offer_segments(offer, delivery):
-    """A basket-wide offer's discount as solver segments, or None when it depends on more than the basket's size.
+def offer_segments(offer, delivery, metres=None):
+    """A basket-wide offer's discount as solver segments, or None when it depends on more than the basket's size and the distance.
 
-    An offer on delivery with no minimum is left to the delivery price Wolt quotes, which already carries it.
+    `metres` is how far the store is from the delivery point. An offer on delivery with no minimum is left to the delivery price Wolt quotes, which already carries it.
     """
     conditions = offer["conditions"]
     needs = conditions.get("basket_contains") or []
     methods = conditions.get("delivery_methods")
-    if any(value for key, value in conditions.items() if key not in ("basket_contains", "delivery_methods")) \
+    nearest, farthest = conditions.get("min_distance"), conditions.get("max_distance")
+    if (nearest or farthest) and (metres is None or metres < (nearest or 0) or metres > (farthest or metres)):
+        return None
+    if any(value for key, value in conditions.items() if key not in ("basket_contains", "delivery_methods", "min_distance", "max_distance")) \
             or (methods and "homedelivery" not in methods) \
             or any(need.get("any_of_items") or need.get("items_from_categories") or need.get("min_quantity") for need in needs):
         return None
@@ -275,19 +292,26 @@ def store(key, lat, lon):
         "offer_ids": [campaign["id"] for campaign in campaigns],
         "every_offer_id": [campaign["id"] for campaign in raw.get("discounts", [])],
         "item_offers": {},
+        "category_offers": {},
         "notes": [],
     }
     for campaign in campaigns:
         cut = campaign["effects"].get("item_discount")
-        if cut and cut.get("fraction"):
-            units = max((need.get("min_quantity") or 1 for need in campaign["conditions"].get("basket_contains") or []), default=1)
+        if cut and (cut.get("fraction") or cut.get("amount_per_item")):
+            # A share or a fixed amount off each unit, on the products or shelf categories named, sometimes only from several units and sometimes sparing a dish's choices.
+            rule = {"fraction": cut.get("fraction"), "amount": cut.get("amount_per_item"), "base_only": bool(cut.get("exclude_options")),
+                    "units": max((need.get("min_quantity") or 1 for need in campaign["conditions"].get("basket_contains") or []), default=1)}
             for item_id in (cut.get("include") or {}).get("items") or []:
-                record["item_offers"][item_id] = [cut["fraction"], units]
+                record["item_offers"][item_id] = rule
+            for category_id in (cut.get("include") or {}).get("categories") or []:
+                record["category_offers"][category_id] = rule
 
     priced = _checkout(record, [{"id": "0" * 24, "count": 1, "base_price": 1, "end_amount": 1}], lat, lon)
     distance = next((re.search(r"\((.+)\)", row["label"]) for row in priced["checkout_rows"]
                      if row.get("template") == "amount_row" and row["label"].startswith("Delivery")), None)
     record["distance"] = distance.group(1) if distance else None
+    away = re.fullmatch(r"([\d.]+) (k?)m", record["distance"] or "")
+    metres = float(away.group(1)) * (1000 if away.group(2) else 1) if away else None
     specs = raw["delivery_specs"]
     record["fees"] = schedule(specs["order_minimum_no_surcharge"], specs["delivery_pricing"]["price_ranges"], {
         "delivery": priced["telemetry"]["delivery_price"],
@@ -300,13 +324,13 @@ def store(key, lat, lon):
         if not (offer["effects"].get("basket_discount") or offer["effects"].get("delivery_discount")):
             continue
         title, limited = offer["description"]["title"], audience(offer)
-        segments = None if limited else offer_segments(offer, priced["telemetry"]["delivery_price"])
+        segments = None if limited else offer_segments(offer, priced["telemetry"]["delivery_price"], metres)
         if segments:
             record["fees"].append({"label": f"Offer: {title}", "segments": segments})
         record["notes"].append(f"offer: {title}" + (f" ({limited}; not counted)" if limited else " (counted in the totals)" if segments
                                                     else " (applied when Wolt prices the basket)"))
-    if record["item_offers"]:
-        record["notes"].append(f"{len(record['item_offers'])} products are under a store campaign; a candidate's price already has its discount, or says from how many units it applies")
+    if record["item_offers"] or record["category_offers"]:
+        record["notes"].append("products here are under store campaigns; a candidate's price already has its discount, or says from how many units it applies")
     return record
 
 

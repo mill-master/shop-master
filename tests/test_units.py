@@ -32,6 +32,12 @@ class Measure(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(units.measure(name), size)
 
+    def test_a_size_below_one_gram_or_millilitre_is_a_mislabel_and_no_size(self):
+        for name in ("Tabla Saperavi red dry 0.75ml", "Didgori sulguni smoked-0.25g"):
+            with self.subTest(name=name):
+                self.assertIsNone(units.measure(name))
+        self.assertEqual(units.measure("Wine 0.75ml, 750 ml"), [750, "ml"])
+
     def test_figures_that_are_not_sizes_are_left_alone(self):
         for name in ("Paracetamol 500mg #20", "iPhone 15 128GB", "კვერცხი 0 კატეგორია", "Milk 2.5%", "5 lemons", "E27 lamp", ""):
             with self.subTest(name=name):

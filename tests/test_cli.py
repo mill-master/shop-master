@@ -35,7 +35,7 @@ def store(platform, name, offers, delivery=250, minimum=2500, **extra):
 
 def sample_run():
     return {
-        "at": "2026-11-27T03:00+04:00", "food": False, "point": {"lat": 41.69, "lon": 44.8, "label": "home"},
+        "shape": cli.RUN_SHAPE, "at": "2026-11-27T03:00+04:00", "food": False, "point": {"lat": 41.69, "lon": 44.8, "label": "home"},
         "picks": {}, "unread": {}, "issued": {"alpha": 1, "beta": 1},
         "wants": {"milk": {"count": 1, "queries": ["milk"]}, "eggs": {"count": 1, "queries": ["eggs"]}, "rice": {"count": 2, "queries": ["rice"]}},
         "stores": {
@@ -119,10 +119,29 @@ class Cli(unittest.TestCase):
         self.assertIn("eggs: 20 × Egg, farm  25.00", self.solve())
 
     def test_a_discount_for_several_units_applies_from_that_many(self):
-        self.change(lambda run: run["stores"]["b1"]["offers"].update(rice=[offer("Rice 1kg", 800, bulk=[2, 0.25])]))
+        self.change(lambda run: run["stores"]["b1"]["offers"].update(rice=[offer("Rice 1kg", 800, bulk=[2, 200])]))
         self.assertIn("rice: 2 × Rice 1kg  12.00", self.solve())
         quiet(cli.pick, picks=["b1.rice=1x1"])
         self.assertIn("rice: 1 × Rice 1kg  8.00", self.solve())
+
+    def test_a_campaign_s_discount_is_rounded_on_each_unit_as_checkout_rounds_it(self):
+        # Measured on Wolt: 30% off from two units, three units of 9.95, charged 20.88 (6.96 each) where 30% of the line would give 20.89.
+        self.change(lambda run: run["stores"]["b1"]["offers"].update(rice=[offer("Rice 1kg", 995, bulk=[2, 299])]))
+        quiet(cli.pick, picks=["b1.rice=1x3"])
+        self.assertIn("rice: 3 × Rice 1kg  20.88", self.solve())
+
+    def test_more_than_one_order_may_take_is_said(self):
+        self.change(lambda run: run["stores"]["b1"]["offers"].update(rice=[offer("Rice 1kg", 800, limit=3, stock=40)]))
+        quiet(cli.pick, picks=["b1.rice=1x8"])
+        self.assertIn("! rice: 8 wanted, and the store shows 3 as the most one order can take", self.solve())
+        quiet(cli.pick, picks=["b1.rice=1x3"])
+        self.assertNotIn("the most one order can take", self.solve())
+
+    def test_a_run_kept_by_another_version_is_gathered_afresh(self):
+        self.change(lambda run: run.update(shape=1))
+        with self.assertRaises(SystemExit) as refusal:
+            self.solve()
+        self.assertIn("Gather afresh", str(refusal.exception))
 
     def test_dropping_the_only_candidate_makes_the_item_missing_there(self):
         quiet(cli.pick, picks=["b1.rice=-"])

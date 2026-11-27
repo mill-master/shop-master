@@ -37,7 +37,8 @@ def measure(text):
         first, second, unit = found.groups()
         factor, base = UNITS[unit.lower()]
         amount = _number(first) * (_number(second) if second else 1) * factor
-        if amount > 0:
+        # "0.75ml" on a wine and "0.25g" on a cheese are litres and kilograms mislabelled; a size under one unit is no size.
+        if amount >= 1:
             sizes.append([round(amount, 3), base])
     told = [size for size in sizes if size != [1, "pc"]] or sizes
     return told[0] if told else None

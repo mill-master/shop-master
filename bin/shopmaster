@@ -13,7 +13,6 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from math import floor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -32,6 +31,7 @@ SAMPLE_BASKETS = (1000, 2500, 5000, 10000)
 CANDIDATES = 8   # products kept per item and store
 ALSO_LISTED = 6  # stores named after the chosen ones, for adding by hand
 ROUNDS = 3       # times a closed or unreadable store is replaced by the next in the ranking
+RUN_SHAPE = 2    # raised whenever what a run records changes meaning, so that an older run is gathered afresh instead of misread
 
 
 def money(amount):
@@ -51,6 +51,13 @@ def load(path, what):
 def save(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+
+
+def load_run(purpose="run"):
+    run = load(RUN_FILE, purpose)
+    if run.get("shape") != RUN_SHAPE:
+        sys.exit("The saved run was gathered by another version of this tool and would be misread. Gather afresh.")
+    return run
 
 
 def attempt(function, *args):
@@ -187,10 +194,10 @@ def standing(run, ref, key):
 
 def amounts(offer, count):
     """What `count` units of a candidate cost, and what they would cost without discounts."""
-    paid = offer["price"] * count
+    each = offer["price"]
     if offer.get("bulk") and count >= offer["bulk"][0]:
-        paid -= floor(paid * offer["bulk"][1] + 0.5)
-    return paid, max(paid, offer.get("list", offer["price"]) * count)
+        each -= offer["bulk"][1]  # a campaign that takes an amount off each unit from that many units
+    return each * count, max(each, offer.get("list", offer["price"])) * count
 
 
 # --- gather ----------------------------------------------------------------
@@ -205,12 +212,12 @@ def gather(args):
     point = load(POINT_FILE, "delivery point")
     lat, lon = point["lat"], point["lon"]
     if args.add:
-        run = load(RUN_FILE, "run to add to")
+        run = load_run("run to add to")
         if run["point"] != point:
             sys.exit("The delivery point has changed since this run was gathered, and its stores carry the old point's fees. Gather afresh.")
         run["extended"] = now()
     else:
-        run = {"at": now(), "point": point, "food": args.food, "wants": {}, "stores": {}, "picks": {}, "unread": {}, "issued": {}}
+        run = {"shape": RUN_SHAPE, "at": now(), "point": point, "food": args.food, "wants": {}, "stores": {}, "picks": {}, "unread": {}, "issued": {}}
     food = run["food"]
     fresh_wants = []
     for spec in args.want:
@@ -366,12 +373,14 @@ def describe_offer(offer):
     if offer.get("list", offer["price"]) > offer["price"]:
         price += f", was {money(offer['list'])}"
     if offer.get("bulk"):
-        price += f", {offer['bulk'][1]:.0%} off from {offer['bulk'][0]} units"
+        price += f", {money(offer['bulk'][1])} off each from {offer['bulk'][0]} units"
     parts.append(price)
     if offer.get("from"):
         parts.append("has choices that can add to the price")
     if offer.get("stock") is not None:
         parts.append(f"stock {offer['stock']}")
+    if offer.get("limit"):
+        parts.append(f"at most {offer['limit']} an order")
     return "  ".join(parts)
 
 
@@ -419,7 +428,7 @@ def show_run(run, only=None):
                     count = f"  → ×{chosen[1]}" if chosen[1] != 1 or "amount" in want else ""
                 elif "amount" in want:
                     packs = units.packs(want["amount"], offer.get("size"))
-                    count = f"  → ×{packs}" if packs else "  → size unknown"
+                    count = f"  → ×{packs}" if packs else "  → sized in another unit" if offer.get("size") else "  → size unknown"
                 else:
                     count = ""
                 print(f"    {label if number == 1 else ' ' * width} {'*' if stands else ' '}{number}  {describe_offer(offer)}{count}")
@@ -441,7 +450,7 @@ def show_gaps(run):
 
 
 def show(args):
-    run = load(RUN_FILE, "run")
+    run = load_run()
     show_run(run, args.ref)
     show_gaps(run)
 
@@ -449,7 +458,7 @@ def show(args):
 # --- pick ------------------------------------------------------------------
 
 def pick(args):
-    run = load(RUN_FILE, "run")
+    run = load_run()
     for spec in args.picks:
         target, _, choice = spec.partition("=")
         ref, _, key = target.partition(".")
@@ -473,7 +482,7 @@ def pick(args):
 
 
 def drop(args):
-    run = load(RUN_FILE, "run")
+    run = load_run()
     for ref in args.refs:
         if ref not in run["stores"]:
             sys.exit(f"{ref}: no such store in the run.")
@@ -512,7 +521,7 @@ def price_exactly(run, plan, lines, quotes):
 
 
 def solve(args):
-    run = load(RUN_FILE, "run")
+    run = load_run()
     stores, lines, skipped = [], {}, []
     for ref, store in run["stores"].items():
         if not store["open"] and not args.closed:
@@ -564,6 +573,9 @@ def solve(args):
                 offer, count = lines[basket["ref"], key]
                 size = f" [{show_size(offer['size'])}]" if offer.get("size") else ""
                 print(f"      {key}: {count} × {offer['name']}{size}  {money(amounts(offer, count)[0])}")
+                most = min(bound for bound in (offer.get("limit"), offer.get("stock"), count) if bound)
+                if most < count:
+                    print(f"      ! {key}: {count} wanted, and the store shows {most} as the most one order can take")
             fees = "".join(f" + {label} {money(amount)}" if amount >= 0 else f" − {label} {money(-amount)}" for label, amount in basket["fees"])
             mine = " for your account" if basket.get("mine") else ""
             basis = {"priced": f"priced by {store['platform'].title()}{mine}", "planned": "planning estimate",

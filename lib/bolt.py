@@ -62,25 +62,39 @@ def discover(query, lat, lon, food):
 def shelf(store, query, lat, lon, limit=8):
     """The best matches for `query` in one provider's menu, by Bolt's own relevance score."""
     items = call("searchInMenu", provider_id=store["key"], search_string=query, delivery_lat=lat, delivery_lng=lon)["items"]
-    dishes = [item for item in (items.values() if isinstance(items, dict) else items)
-              if item.get("type") == "dish" and item.get("availability") == "in_stock"]
+    items = items if isinstance(items, dict) else {str(item["id"]): item for item in items}
+    dishes = [item for item in items.values() if item.get("type") == "dish" and item.get("availability") == "in_stock"]
     dishes.sort(key=lambda dish: -(dish.get("score") or 0))
     offers = []
     for dish in dishes[:limit]:
-        name, price = dish["name"]["value"].strip(), _minor(dish["price"]["value"])
+        # A dish with choices to make shows a base price, sometimes a token one; the cheapest obligatory choices are added to it.
+        name, price = dish["name"]["value"].strip(), _minor(dish["price"]["value"]) + _required_choices(dish, items)
         # Bolt prices the pack as named and, for goods it reckons by weight, adds the price per kilogram ("67,00 ₾/kg"); the two give the pack's weight.
+        # Without that figure a product reckoned by weight has no size that can be trusted.
         per_kilo = ((dish.get("unit_price") or {}).get("unit_price") or {}).get("value") or ""
+        by_weight = dish.get("selling_unit") == "kg"
         offers.append({
             "id": str(dish["id"]),
             "name": name,
             "price": price,
             "list": price,
-            "size": [round(price / money(per_kilo) * 1000), "g"] if per_kilo.endswith("/kg") and money(per_kilo) else measure(name),
+            "size": [round(price / money(per_kilo) * 1000), "g"] if per_kilo.endswith("/kg") and money(per_kilo) else None if by_weight else measure(name),
             "from": dish.get("option_group_presence") not in (None, "none"),
             "stock": dish.get("available_quantity"),
+            "limit": dish.get("order_limit_quantity"),
             "note": ((dish.get("description") or {}).get("value") or "").strip() or None,
         })
     return offers
+
+
+def _required_choices(dish, items):
+    """What the cheapest obligatory choices add to a dish's price. Its groups of choices and their options come in the same reply; each option is taken once."""
+    added = 0
+    for group in (items.get(str(child)) or {} for child in dish.get("child_ids") or []):
+        options = [items.get(str(option)) or {} for option in group.get("child_ids") or []]
+        prices = sorted(_minor((option.get("price") or {}).get("value") or 0) for option in options if option.get("availability", "in_stock") == "in_stock")
+        added += sum(prices[: group.get("min") or 0])
+    return added
 
 
 def store(key, lat, lon):

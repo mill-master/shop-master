@@ -24,14 +24,23 @@ def answering(table):
     return fetch
 
 
+def cut(fraction=None, units=1, amount=None, base_only=False):
+    """A store campaign on products as the Wolt reader keeps it."""
+    return {"fraction": fraction, "amount": amount, "base_only": base_only, "units": units}
+
+
 class WoltShelf(unittest.TestCase):
-    STORE = {"key": "market", "item_offers": {"shampoo": [0.3, 1], "franui": [0.3, 2]}}
+    STORE = {"key": "market", "item_offers": {"shampoo": cut(0.3), "franui": cut(0.3, units=2), "razor": cut(amount=300), "set": cut(0.32, base_only=True)},
+             "category_offers": {"sweets": cut(0.3)}}
     REPLY = {
+        "categories": [{"id": "dairy", "item_ids": ["milk"]}, {"id": "all", "item_ids": ["wafer"]}, {"id": "sweets", "item_ids": ["wafer"]}],
         "options": [{"id": "flavours", "values": [{"id": "v1", "name": "Four cheese", "price": 1500}, {"id": "v2", "name": "Spinach", "price": 1300}]},
                     {"id": "extras", "values": [{"id": "v3", "name": "Sauce", "price": 200}]}],
         "items": [
             {"id": "milk", "name": "Sante Milk 2.5%, 1L", "price": 549, "original_price": 625, "unit_info": "1 l", "purchasable_balance": 37},
-            {"id": "shampoo", "name": "Bioderma Node 400მლ", "price": 8795, "purchasable_balance": 5},
+            {"id": "shampoo", "name": "Bioderma Node 400მლ", "price": 8795, "purchasable_balance": 5, "max_quantity_per_purchase": 3},
+            {"id": "wafer", "name": "ROSHEN Lakmi 90 g", "price": 199, "original_price": 395},
+            {"id": "razor", "name": "Razor", "price": 1500},
             {"id": "franui", "name": "Franui 150g", "price": 2450, "purchasable_balance": 9},
             {"id": "cheese", "name": "Cheese Imeruli 1 kg", "price": 2200, "purchasable_balance": 9000,
              "sell_by_weight_config": {"grams_per_step": 500, "price_per_kg": 2200}},
@@ -48,17 +57,26 @@ class WoltShelf(unittest.TestCase):
             self.offers = {offer["id"]: offer for offer in wolt.shelf(self.STORE, "anything", *POINT)}
 
     def test_what_cannot_be_bought_now_is_left_out(self):
-        self.assertEqual(list(self.offers), ["milk", "shampoo", "franui", "cheese", "set"])
+        self.assertEqual(list(self.offers), ["milk", "shampoo", "wafer", "razor", "franui", "cheese", "set"])
 
     def test_a_price_cut_keeps_the_old_price_as_the_listed_one(self):
         self.assertEqual({k: self.offers["milk"][k] for k in ("price", "list", "base", "size")}, {"price": 549, "list": 625, "base": 549, "size": [1000, "ml"]})
 
     def test_a_campaign_on_one_unit_is_taken_off_the_shelf_price(self):
         shampoo = self.offers["shampoo"]
-        self.assertEqual((shampoo["price"], shampoo["list"], shampoo["base"]), (6156, 8795, 8795))
+        self.assertEqual((shampoo["price"], shampoo["list"], shampoo["base"], shampoo["limit"]), (6156, 8795, 8795, 3))
+
+    def test_a_campaign_on_a_shelf_category_reaches_the_products_on_it(self):
+        # Measured at Carrefour Vekua: listed at 1.99 after a cut from 3.95, charged 1.39 under a 30% campaign on its category.
+        wafer = self.offers["wafer"]
+        self.assertEqual((wafer["price"], wafer["list"], wafer["category"]), (139, 395, "sweets"))
+        self.assertEqual(self.offers["milk"]["category"], "dairy")
+
+    def test_a_campaign_of_a_fixed_amount_comes_off_each_unit(self):
+        self.assertEqual(self.offers["razor"]["price"], 1200)
 
     def test_a_campaign_needing_several_units_is_kept_as_a_condition(self):
-        self.assertEqual((self.offers["franui"]["price"], self.offers["franui"]["bulk"]), (2450, [2, 0.3]))
+        self.assertEqual((self.offers["franui"]["price"], self.offers["franui"]["bulk"]), (2450, [2, 735]))
 
     def test_goods_by_weight_are_priced_by_the_step(self):
         cheese = self.offers["cheese"]
@@ -66,7 +84,8 @@ class WoltShelf(unittest.TestCase):
 
     def test_a_dish_starts_at_its_cheapest_obligatory_choices(self):
         dish = self.offers["set"]
-        self.assertEqual((dish["price"], dish["base"], dish["extra"], dish["from"]), (4100, 200, 3900, True))
+        # Its campaign spares the choices: 32% comes off the dish's own 2.00 and nothing off the 39.00 of choices.
+        self.assertEqual((dish["price"], dish["base"], dish["extra"], dish["from"]), (4036, 200, 3900, True))
         self.assertEqual(dish["choices"], [{"id": "b1", "values": [{"id": "v2", "count": 3, "price": 1300}]}])
 
 
@@ -89,6 +108,12 @@ class WoltPricing(unittest.TestCase):
         self.assertEqual(plan["use_promo_discount_ids"], ["c1"])
         self.assertEqual({k: plan["menu_items"][0][k] for k in ("id", "count", "base_price", "end_amount")}, {"id": "franui", "count": 2, "base_price": 2450, "end_amount": 4900})
 
+    def test_a_line_names_its_shelf_category_which_checkout_matches_campaigns_on(self):
+        sent = {}
+        with mock.patch.object(wolt, "fetch", answering({"pages/checkout": lambda body: sent.update(body) or {"checkout_rows": []}})):
+            wolt.quote(self.STORE, [({"id": "wafer", "base": 199, "price": 139, "category": "sweets"}, 1), ({"id": "loose", "base": 100, "price": 100}, 1)], *POINT)
+        self.assertEqual([line["category_id"] for line in sent["purchase_plan"]["menu_items"]], ["sweets", "loose"])
+
     def test_choices_and_weighed_goods_are_stated_as_checkout_wants_them(self):
         sent = {}
         lines = [({"id": "set", "base": 200, "extra": 3900, "choices": [{"id": "b1", "values": []}]}, 1), ({"id": "cheese", "base": 1100, "weighed": True}, 2)]
@@ -107,6 +132,10 @@ class WoltStore(unittest.TestCase):
         campaigns = [
             self.campaign("30% off shampoo", {"item_discount": {"fraction": 0.3, "include": {"items": ["shampoo"]}}}),
             self.campaign("2x Franui", {"item_discount": {"fraction": 0.3, "include": {"items": ["franui"]}}}, {"basket_contains": [{"min_quantity": 2}]}),
+            self.campaign("Blue Friday", {"item_discount": {"fraction": 0.3, "include": {"categories": ["sweets"], "items": None}}}),
+            self.campaign("3 GEL off", {"item_discount": {"amount_per_item": 300, "include": {"items": ["razor"]}}}),
+            self.campaign("Combo", {"item_discount": {"fraction": 0.32, "exclude_options": True, "include": {"items": ["set"]}}}),
+            self.campaign("Members' shelf", {"item_discount": {"fraction": 0.5, "include": {"items": ["milk"]}}}, {"has_wolt_plus": True}),
             self.campaign("GEL10 off on orders over GEL60", {"basket_discount": {"amount": 1000}}, {"basket_contains": [{"min_amount": 6000}]}),
             self.campaign("GEL0 delivery fee", {"delivery_discount": {"fraction": 1.0}}, points=["For new users with a local phone number."]),
         ]
@@ -122,14 +151,23 @@ class WoltStore(unittest.TestCase):
         with mock.patch.object(wolt, "fetch", answering(table)):
             record = wolt.store("market", *POINT)
         self.assertEqual((record["name"], record["open"], record["eta"], record["distance"], record["rating"]), ("Market", True, "30-40 min", "610 m", "9.4"))
-        self.assertEqual(record["offer_ids"], ["30% off shampoo", "2x Franui", "GEL10 off on orders over GEL60"])
-        self.assertEqual(record["every_offer_id"], record["offer_ids"] + ["GEL0 delivery fee"])
+        self.assertEqual(record["offer_ids"], ["30% off shampoo", "2x Franui", "Blue Friday", "3 GEL off", "Combo", "GEL10 off on orders over GEL60"])
+        self.assertEqual(sorted(record["every_offer_id"]), sorted(record["offer_ids"] + ["Members' shelf", "GEL0 delivery fee"]))
         self.assertEqual(sent["purchase_plan"]["use_promo_discount_ids"], record["offer_ids"])
-        self.assertEqual(record["item_offers"], {"shampoo": [0.3, 1], "franui": [0.3, 2]})
+        self.assertEqual(record["item_offers"], {"shampoo": cut(0.3), "franui": cut(0.3, units=2), "razor": cut(amount=300), "set": cut(0.32, base_only=True)})
+        self.assertEqual(record["category_offers"], {"sweets": cut(0.3)})
         self.assertEqual([fee["label"] for fee in record["fees"]], ["Delivery", "Service fee", "Small order fee", "Bag", "Offer: GEL10 off on orders over GEL60"])
         self.assertEqual(record["fees"][2]["on"], "list")
         self.assertIn("offer: GEL10 off on orders over GEL60 (counted in the totals)", record["notes"])
         self.assertIn("offer: GEL0 delivery fee (new customers; not counted)", record["notes"])
+
+    def test_free_delivery_within_a_distance_counts_for_a_store_that_near(self):
+        # Measured at Farmers Market Vera: delivery 3.09 under 20.00 of goods and nothing from 20.00, for a store within 5 km.
+        offer = self.campaign("GEL0 delivery fee on orders over GEL20", {"delivery_discount": {"fraction": 1.0}},
+                              {"basket_contains": [{"min_amount": 2000}], "delivery_methods": ["homedelivery"], "max_distance": 5000})
+        self.assertEqual(wolt.offer_segments(offer, 309, 1200.0), [[2000, None, -309, 0]])
+        self.assertIsNone(wolt.offer_segments(offer, 309, 6100.0))
+        self.assertIsNone(wolt.offer_segments(offer, 309, None))
 
     def test_the_search_tells_stores_from_restaurants_and_leaves_open_unknown(self):
         def hit(slug, line, available=True):
@@ -152,15 +190,33 @@ class BoltShelf(unittest.TestCase):
         items = {
             "1": self.dish(1, "Cheese / Frico / Gouda briquette 100 g", 4.5, 50, selling_unit="kg", unit_price={"unit_price": {"value": "45,00 ₾/kg"}}),
             "2": self.dish(2, "Butter Valio 500 gr", 36.95, 70, selling_unit="piece"),
-            "3": self.dish(3, "Shawarma", 15.0, 60, option_group_presence="required"),
+            "3": self.dish(3, "Shawarma", 15.0, 60, option_group_presence="only_optional", order_limit_quantity=4),
             "4": {"type": "category", "id": 4},
             "5": self.dish(5, "Out", 1.0, 99, availability="out_of_stock"),
+            "6": self.dish(6, "DAIRYLAND Danablue 2*3.2 kg", 6.5, 40, selling_unit="kg"),
         }
         with mock.patch.object(bolt, "fetch", answering({"searchInMenu": {"code": 0, "data": {"items": items}}})):
             offers = bolt.shelf({"key": "99610"}, "x", *POINT)
-        self.assertEqual([offer["name"] for offer in offers], ["Butter Valio 500 gr", "Shawarma", "Cheese / Frico / Gouda briquette 100 g"])
-        self.assertEqual([(offer["price"], offer["size"], offer["from"]) for offer in offers],
-                         [(3695, [500, "g"], False), (1500, None, True), (450, [100, "g"], False)])
+        self.assertEqual([offer["name"] for offer in offers],
+                         ["Butter Valio 500 gr", "Shawarma", "Cheese / Frico / Gouda briquette 100 g", "DAIRYLAND Danablue 2*3.2 kg"])
+        # A product reckoned by weight with no price per kilogram has no size to trust: its name gives the wheel it is cut from.
+        self.assertEqual([(offer["price"], offer["size"], offer["from"], offer["limit"]) for offer in offers],
+                         [(3695, [500, "g"], False, None), (1500, None, True, 4), (450, [100, "g"], False, None), (650, None, False, None)])
+
+    def test_a_dish_starts_at_its_cheapest_obligatory_choices(self):
+        # Measured at provider 12088: "Pizza 33Cm" is listed at 0.10 and cannot be ordered without two halves, the cheapest at 10.95 and 13.95.
+        def option(ident, price, availability="in_stock"):
+            return {"type": "option_multi_select", "id": ident, "price": {"value": price}, "availability": availability}
+        items = {
+            "1": self.dish(1, "Pizza 33Cm", 0.1, 50, option_group_presence="required_or_preselected", child_ids=[10, 20]),
+            "10": {"type": "option_multi_select_group", "id": 10, "min": 2, "max": 2, "is_required": True, "child_ids": [11, 12, 13, 14]},
+            "11": option(11, 17.95), "12": option(12, 13.95), "13": option(13, 10.95), "14": option(14, 5.0, "out_of_stock"),
+            "20": {"type": "option_multi_select_group", "id": 20, "min": 0, "max": 1, "is_required": False, "child_ids": [21]},
+            "21": option(21, 3.5),
+        }
+        with mock.patch.object(bolt, "fetch", answering({"searchInMenu": {"code": 0, "data": {"items": items}}})):
+            pizza, = bolt.shelf({"key": "12088"}, "x", *POINT)
+        self.assertEqual((pizza["price"], pizza["from"]), (2500, True))
 
     def test_a_refused_call_is_an_error_naming_it(self):
         with mock.patch.object(bolt, "fetch", answering({"searchInMenu": {"code": 702, "message": "INVALID_REQUEST"}})):
@@ -179,7 +235,7 @@ class BoltShelf(unittest.TestCase):
 
 
 class Glovo(unittest.TestCase):
-    PLACE = {"cityCode": "TBI", "countryCode": "GE", "addressComponents": {"administrative_area_level_1": "Tbilisi"}}
+    PLACE = {"cityCode": "TBI", "countryCode": "GE", "addressComponents": {"administrative_area_level_1": "Tbilisi", "locality": "T'bilisi"}}
 
     def card(self, slug, category, is_open="true"):
         return {"type": "STORE_CARD_V2", "data": {"slug": slug, "title": {"text": {"text": slug.upper()}}},
@@ -213,13 +269,18 @@ class Glovo(unittest.TestCase):
             {"id": 1, "name": "რძე /სოფლის ნობათი/ 2,5% 950მლ", "price": 6.2, "promotion": {"price": 5.49, "title": "-0,71 ₾", "isPrime": False}},
             {"id": 2, "name": "პიცა", "price": 30.0, "promotion": {"price": 18.0, "title": "-40%", "isPrime": True}, "attributeGroups": [{"id": 1}]},
             {"id": 3, "name": "კვერცხი 10ც", "price": 5.8, "description": " fresh "},
+            # Measured at Wendy's: a combo listed at 13.90 whose size must be chosen, the choices adding 1.95 or 3.90.
+            {"id": 4, "name": "ვეჯი ბურგერის კომბო", "price": 13.9, "attributeGroups": [
+                {"id": 7, "min": 1, "max": 1, "attributes": [{"priceImpact": 3.9}, {"priceImpact": 1.95}]},
+                {"id": 8, "min": 0, "max": 3, "attributes": [{"priceImpact": 0.5}]}]},
         ]
         table = {"addresslookup": self.PLACE, "/search?query=": {"results": [{"products": products}]}}
         with mock.patch.object(glovo, "fetch", answering(table)), mock.patch.dict(glovo._places, clear=True):
-            milk, pizza, eggs = glovo.shelf({"store_id": 1, "address_id": 2}, "x", *POINT)
+            milk, pizza, eggs, combo = glovo.shelf({"store_id": 1, "address_id": 2}, "x", *POINT)
         self.assertEqual((milk["price"], milk["list"], milk["size"]), (549, 620, [950, "ml"]))
         self.assertEqual((pizza["price"], pizza["from"], pizza["note"]), (3000, True, "offer: -40% (Prime members)"))
         self.assertEqual((eggs["size"], eggs["note"]), ([10, "pc"], "fresh"))
+        self.assertEqual((combo["price"], combo["list"], combo["from"]), (1585, 1585, True))
 
     def test_a_store_counts_a_whole_menu_offer_and_lists_the_rest(self):
         info = {"id": 26609, "addressId": 687129, "name": "Gennaro", "slug": "gennaro-tbi", "open": True, "rating": "97%", "distance": "4km",
@@ -237,6 +298,15 @@ class Glovo(unittest.TestCase):
         self.assertEqual(record["notes"][:3], ["offer: Free delivery on the first order", "offer: -20% whole menu, baskets from 40.00 (counted in the totals)",
                                                "offer: -25% whole menu, baskets from 40.00 (Prime members)"])
         self.assertEqual((record["currency"], record["distance"], record["open"]), ("GEL", "4km", True))
+
+    def test_a_store_s_address_names_the_city_as_glovo_s_pages_spell_it(self):
+        # Barcelona lies in the region Catalunya; Glovo's full page for a store there is the one under "barcelona".
+        info = {"id": 1, "addressId": 2, "name": "Paul", "slug": "paul-barcelona", "open": True, "deliveryFeeInfo": {"fee": 0.99}}
+        place = {"cityCode": "BCN", "countryCode": "ES", "addressComponents": {"administrative_area_level_1": "Catalunya", "locality": "Barcelona"}}
+        for components, city in ((place["addressComponents"], "barcelona"), ({"locality": "Sant Cugat del Vallès"}, "sant-cugat-del-valles"), ({}, "bcn")):
+            table = {"addresslookup": {**place, "addressComponents": components}, "/v3/stores/paul-barcelona": info, "node/store_fees": {"data": {"ranges": []}}}
+            with self.subTest(city=city), mock.patch.object(glovo, "fetch", answering(table)), mock.patch.dict(glovo._places, clear=True):
+                self.assertEqual(glovo.store("paul-barcelona", 41.3874, 2.1686)["url"], f"https://glovoapp.com/en/es/{city}/stores/paul-barcelona")
 
 
 if __name__ == "__main__":
