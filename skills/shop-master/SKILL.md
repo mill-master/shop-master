@@ -66,7 +66,7 @@ Free delivery above a basket amount, for a customer with no subscription, was no
 
 The totals are those of a customer with none of these. A shopper who holds one pays less on that platform than shown, by up to the whole delivery fee and most of the service fee, which can change which plan wins. Ask whether they subscribe when two platforms are close, and say which way it tilts.
 
-`caveat:` and `!` lines are the tool telling you what it could not establish; a failed lookup or store read means unknown, not absent, and `gather --add` tries it again.
+`caveat:` and `!` lines are the tool telling you what it could not establish. A failed lookup or store read means unknown, not absent, so settle it before answering: run `gather --add`, which tries again whatever failed, until those lines are gone. Report a gap to the shopper only when it survives that, with its reason.
 
 A closed store is passed over for the next in the ranking, and left out of `solve`, unless `--closed` is given, which suits an order planned for later.
 
@@ -82,4 +82,4 @@ Prices, stock and opening state are as of the run's time, printed at the top of 
 
 ## When something breaks
 
-The platforms' web interfaces are private and change without notice. A failure names the platform's host and the call that failed. A platform that answers 429 is throttling: the tool waits and tries again, and after a heavy session it can take a minute or two before that platform answers. [platforms.md](platforms.md) records, for each platform, the calls in use, what each was verified to return, the fee measurements behind the rules, and what remains unverified, including what is known of signed-in access.
+The platforms' web interfaces are private and change without notice. A failure names the platform's host and the call that failed. A platform that answers 429 is throttling: the tool waits and tries again by itself, and when lookups still fail with 429, a minute's pause before `gather --add` lets that platform recover. [platforms.md](platforms.md) records, for each platform, the calls in use, what each was verified to return, the fee measurements behind the rules, and what remains unverified, including what is known of signed-in access.

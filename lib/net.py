@@ -8,8 +8,10 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
-# Seconds between two requests to one host. The platforms throttle bursts, and a gather sends dozens of requests; at 0.2 Glovo answered some with 429.
+# Seconds between two requests to one host. The platforms throttle bursts, and a gather sends dozens of requests.
 GAP = 0.35
+# Glovo throttles sooner than the others: at three requests a second it answered 429 in most gathers.
+SLOWER = {"api.glovoapp.com": 1.0}
 RETRY_ON = (429, 502, 503, 504)
 ATTEMPTS = 4
 
@@ -21,7 +23,7 @@ def _wait_turn(host):
     with _lock:
         now = time.monotonic()
         slot = max(now, _next_slot.get(host, 0.0))
-        _next_slot[host] = slot + GAP
+        _next_slot[host] = slot + SLOWER.get(host, GAP)
     time.sleep(slot - now)
 
 
