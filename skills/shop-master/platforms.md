@@ -5,7 +5,7 @@ Everything here was observed on 2026-11-27 from a connection in Tbilisi, for a d
 ## Connectors and MCP servers
 
 - **Glovo** runs an official search-only MCP server at `https://api.glovoapp.com/discovery-mcp/mcp` (tools `search_products` and `render_products_carousel`). It answers `403 Forbidden` to local clients: a plain JSON-RPC `initialize`, the MCP inspector, and Claude Code's own HTTP client were all refused, while a nonexistent path beside it returns `404`. Glovo documents it only as a connector chosen inside Claude's Connectors settings. It returns products and store details and no fee rules, so the adapter reads the web client's calls instead.
-- **Wolt** has no official server. `github.com/erlaufer/wolt-mcp` is an unofficial one built on the web client's calls, including signed-in basket writes. Its source documents Wolt's token refresh and basket endpoints, and was read for the request headers used here; it is not a dependency.
+- **Wolt** has no official server. Two unofficial ones exist, both built on the web client's calls and both able to fill a signed-in basket: `github.com/erlaufer/wolt-mcp`, and `github.com/mekedron/wolt-mcp`, which is the one listed at `mcpmarket.com/server/wolt`. The first one's source documents Wolt's token refresh and basket endpoints, and was read for the request headers used here; the second has not been examined. Neither is a dependency.
 - **Bolt Food** has no MCP server or published consumer client that a search of GitHub and the MCP directories turned up. `developer.bolt.eu` documents the merchant side only.
 
 ## Wolt
@@ -33,6 +33,10 @@ Fees measured through that call, at a grocery store (Wolt Market Baratashvili, m
 
 An anonymous visitor is shown new-customer offers ("GEL0 delivery fee", "GEL12 off on orders over GEL30"), marked as such only in their description text. The store page's displayed delivery price of zero comes from them.
 
+Checkout applies the offers whose ids it is given and whose conditions the basket meets. A discount on the goods comes back as a lowered "Item subtotal" beside its original amount, and the service fee stays computed on the original. Measured: "10% off (up to GEL20) on orders over GEL50" took 6.00 off a 60.00 basket and 20.00 off a 300.00 one, and nothing off 40.00; "GEL50 off on orders over GEL200" took 50.00 off 250.00 and nothing off 150.00. Given a new-customer goods offer together with one for every customer, checkout applied one of the two, so offers on the goods do not add up.
+
+Of some thirty stores and restaurants sampled, three ran an offer on the goods for every customer, and one restaurant ran free delivery for every customer with no minimum. None offered free delivery above a basket amount.
+
 A weighed item carries `sell_by_weight_config` with `price_per_kg` and `grams_per_step`; its `price` is the price per kilogram and its stock figure is in grams.
 
 ## Glovo
@@ -51,6 +55,8 @@ The search answers with a screen description: a card per store, followed by a ro
 Fee parameters as published, for a supermarket (SPAR): delivery 1.49 lari; `serviceFeeInfo` of `setupValue` 9 with `minValue` 229 and `maxValue` 699; one surcharge range from 0 to 30 lari of 2.99 lari with strategy `CAPPED`. A restaurant showed 9 / 129 / 499 and a 1.99 surcharge below 15 lari. The adapter reads these as a 9% service fee between the two bounds and a surcharge equal to the gap up to the range's end, at most the stated amount. **Neither reading has been checked against a priced order**: the call that itemises a basket's fees, `/v1/stores/{id}/addresses/{addressId}/node/fees_breakdown`, answers `401 Missing auth token`.
 
 A product's `promotion.price` is its discounted price; `promotion.isPrime` marks a subscriber-only price, which the adapter leaves out of the total. Store pages live at `glovoapp.com/en/{country}/{city}/stores/{slug}`.
+
+A store's `promotions` were of four kinds across some thirty stores and restaurants: `FREE_DELIVERY` "on the first order" at every one of them; `FLAT_PRODUCT` and `PERCENTAGE_DISCOUNT` on "select items", some of the latter "with Prime"; and, at one restaurant, `BASKET_PERCENTAGE` on the "whole menu" with a `minimumBasketSizeCents` of 4000. The adapter counts the last kind, when it is not for Prime members, as that percentage off a basket of at least that size. This reading, too, is unchecked.
 
 ## Bolt Food
 
@@ -71,7 +77,7 @@ Provider pages live at `food.bolt.eu/en-US/{city_id}/p/{slug}`.
 
 ## Signed-in access
 
-None of it has been exercised. The shopper signs in to each platform's site in a Chrome profile of its own, kept at `$HOME/.local/share/shop-master/browser` apart from their everyday browser, so that a later version can reuse those sessions. What the web clients show:
+None of it has been exercised. What the web clients show:
 
 - **Wolt**: the checkout call accepts a bearer token, and the dynamic store call has subscription fields (`delivery_pricing_with_subscription`, `subscription.active_plan_id`) that are empty for an anonymous visitor. Stores in Tbilisi carried `show_wolt_plus: false`. Per the wolt-mcp source, a basket is written with `POST /order-xp/v1/baskets` (a whole-basket replace keyed by store id) and the access token is refreshed at `authentication.wolt.com/v1/wauth2/access_token`.
 - **Glovo**: the web bundle names `v1/authenticated/customers/{id}/baskets`, `v2/baskets/stores/{id}?storeAddressId=` and guest equivalents under `v2/guest/customers/{id}/`. Stores report `primeAvailable: true`.
