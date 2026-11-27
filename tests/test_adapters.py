@@ -309,14 +309,14 @@ class Glovo(unittest.TestCase):
             {"store": "night", "name": "NIGHT", "open": False, "price": 300}])
         self.assertEqual(self.search(True), [{"store": "cafe", "name": "CAFE", "open": True, "price": 1400}])
 
-    def test_stores_are_searched_across_every_kind_and_among_the_groceries_alone(self):
+    def test_groceries_are_searched_on_their_own_when_the_search_shows_products_for_few_stores(self):
         # Measured in Barcelona: "huevos" across every kind showed products for restaurants only, and for 22 grocery stores once groceries were asked for.
         asked = []
 
         def screen(url):
             asked.append(url.split("search?")[1])
             store = "mercadona" if "categoryId=4" in url else "farmacia"
-            return {"data": {"body": {"data": {"elements": [self.card(store, "4" if store == "mercadona" else "3"), self.row("2,10 €")]}}}}
+            return {"data": {"body": {"data": {"elements": [{"data": {"title": "an element of no type"}}, self.card(store, "4" if store == "mercadona" else "3"), self.row("2,10 €")]}}}}
         with mock.patch.object(glovo, "fetch", lambda url, headers=None, body=None, **more: self.PLACE if "addresslookup" in url else {} if "seo-content" in url else screen(url)), \
                 mock.patch.dict(glovo._places, clear=True):
             stores = [hit["store"] for hit in glovo.discover("huevos", *POINT, False)]
@@ -324,6 +324,17 @@ class Glovo(unittest.TestCase):
         self.assertEqual(stores, ["farmacia", "mercadona"])
         self.assertEqual(asked, ["searchQuery=huevos", "searchQuery=huevos&categoryId=4", "searchQuery=huevos&categoryId=1"])
         self.assertEqual(dishes, [])
+
+    def test_a_search_that_shows_products_for_enough_stores_is_not_repeated_among_the_groceries(self):
+        asked = []
+
+        def screen(url):
+            asked.append(url.split("search?")[1])
+            return {"data": {"body": {"data": {"elements": [part for store in ("spar", "fresco", "nikora") for part in (self.card(store, "4"), self.row("4,49 ₾"))]}}}}
+        with mock.patch.object(glovo, "fetch", lambda url, headers=None, body=None, **more: self.PLACE if "addresslookup" in url else {} if "seo-content" in url else screen(url)), \
+                mock.patch.dict(glovo._places, clear=True):
+            self.assertEqual([hit["store"] for hit in glovo.discover("milk", *POINT, False)], ["spar", "fresco", "nikora"])
+        self.assertEqual(asked, ["searchQuery=milk"])
 
     def test_a_country_glovo_is_not_in_is_said_at_once(self):
         # Measured for Helsinki: Glovo names a city all the same, has no page for the country, and no server answers a search there.

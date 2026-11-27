@@ -21,12 +21,14 @@ except ImportError:  # Windows has no file locks of this kind; there the pacing 
 GAP = 1.0
 # A request made for a signed-in account keeps a wider berth, and is made once: the first pushback is taken as the answer.
 ACCOUNT_GAP = 3.0
-# The most one host is asked in an hour, and the most of that for a signed-in account. They are this tool's own restraint, set well above what pricing
-# a few lists takes and well below what the gaps alone would allow; no platform publishes a figure.
-HOURLY = 900
+# The most one host is asked in an hour, and the most of that for a signed-in account. They are this tool's own restraint; no platform publishes a figure.
+# One comparison asks a host some 60 to 100 times. Glovo began answering 429 to requests a second apart after a day in which it was asked several hundred times an hour.
+HOURLY = 300
 ACCOUNT_HOURLY = 40
 RETRY_ON = (429, 502, 503, 504)
 ATTEMPTS = 4
+# Seconds a host is left alone once it has answered 429 to every attempt of one request. Trying on would add to the load it is refusing.
+REST = 600
 # What has been asked of each host and when it may next be asked. It is kept on disk so that runs one after another, or side by side, pace themselves as one.
 PACE_FILE = Path.home() / ".cache" / "shop-master" / "pace.json"
 
@@ -50,10 +52,18 @@ def _pace(host):
         json.dump(record, kept)
 
 
+def _throttled(host, until):
+    refusal = RuntimeError(f"{host} is throttling and is left alone until {time.strftime('%H:%M', time.localtime(until))}")
+    refusal.status, refusal.reply = 429, None
+    return refusal
+
+
 def _wait_turn(host, gap, acting=False):
-    """Take the next free moment on `host` and wait for it. Refuses once the host has been asked as often as this tool asks in an hour."""
+    """Take the next free moment on `host` and wait for it. Refuses while the host is being left alone, and once it has been asked as often as this tool asks in an hour."""
     with _pace(host) as asked:
         now = time.time()
+        if asked.get("resting", 0) > now:
+            raise _throttled(host, asked["resting"])
         if "since" not in asked or now - asked["since"] >= 3600:
             asked.update(since=now, count=0, for_account=0)
         if asked["count"] >= HOURLY or (acting and asked["for_account"] >= ACCOUNT_HOURLY):
@@ -108,6 +118,10 @@ def fetch(url, headers=None, body=None, form=None, timeout=40, acting=False, pat
                     raw = gzip.decompress(raw)
                 return json.loads(raw)
         except urllib.error.HTTPError as error:
+            if error.code == 429 and attempt == attempts - 1:
+                with _pace(host) as asked:
+                    asked["resting"] = time.time() + REST
+                raise _throttled(host, time.time() + REST) from error
             if error.code not in RETRY_ON or attempt == attempts - 1:
                 refusal = RuntimeError(f"{call} answered {error.code}")
                 answer = error.read() if error.fp else b""

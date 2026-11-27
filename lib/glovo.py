@@ -42,6 +42,7 @@ STARTED = str(int(time.time() * 1000))
 
 FOOD_CATEGORY = "1"  # Glovo's category number for restaurants
 GROCERIES = "4"
+ENOUGH_STORES = 3     # stores with products in a search, short of which the groceries are searched on their own; a run reads that many stores of a platform
 
 # The signed-in session, when there is one, and what to call after it changes so that it is kept. Both are set by the command-line tool.
 ACCOUNT = None
@@ -123,13 +124,17 @@ def _minor(lari):
 def discover(query, lat, lon, food):
     """Products matching `query`, store by store (restaurant by restaurant for `food`). Glovo answers with its search screen: a card per store, followed by a row of that store's matching products.
 
-    A search across every kind of store shows products only for the stores it ranks first, and for a word that is also a dish those are restaurants. Stores are therefore searched twice: across every kind, which finds pharmacies and other shops, and among the groceries alone.
+    A search across every kind of store shows products only for the stores it ranks first, and for a word that is also a dish those are restaurants. When it shows products for few stores, the groceries are therefore searched on their own as well.
     """
-    hits = []
-    for category in ([FOOD_CATEGORY] if food else [None, GROCERIES]):
+    def search(category):
         reply = fetch(f"{API}/v1/web/store_wall/search?searchQuery={urlquote(query)}" + (f"&categoryId={category}" if category else ""),
                       _headers(lat, lon, True), {"searchContext": {"searchId": str(uuid4())}})
-        hits += [hit for hit in _cards(reply["data"]["body"]["data"]["elements"], food) if hit not in hits]
+        return _cards(reply["data"]["body"]["data"]["elements"], food)
+    if food:
+        return search(FOOD_CATEGORY)
+    hits = search(None)
+    if len({hit["store"] for hit in hits}) < ENOUGH_STORES:
+        hits += [hit for hit in search(GROCERIES) if hit not in hits]
     return hits
 
 
@@ -137,7 +142,8 @@ def _cards(elements, food):
     """The products on a search screen, each with the store whose card stands before its row."""
     hits, card = [], None
     for element in elements:
-        if element["type"] == "STORE_CARD_V2":
+        kind = element.get("type")  # a screen with nothing found carries an element of no type
+        if kind == "STORE_CARD_V2":
             state = _find(element, "shopIsOpen")  # the card's display event carries the store's state
             if not state:
                 raise RuntimeError(f"Glovo's search card for {element['data'].get('slug')} came without the store's state")
@@ -145,7 +151,7 @@ def _cards(elements, food):
             card = {"store": element["data"]["slug"], "name": title or element["data"]["slug"], "open": state["shopIsOpen"] == "true"}
             if (state["glovoCategoryId"] == FOOD_CATEGORY) != food:
                 card = None
-        elif element["type"] == "CAROUSEL" and card:
+        elif kind == "CAROUSEL" and card:
             for product in element["data"]["elements"]:
                 shown = (product["data"].get("pricing") or {}).get("finalPrice")
                 if shown:

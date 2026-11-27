@@ -70,7 +70,8 @@ class Fetch(unittest.TestCase):
     def test_a_request_made_for_an_account_is_never_repeated(self):
         self.acting = True
         result, attempts, sleeps = self.fetch(http_error(429, {"retry-after": "7"}), {"ok": 1})
-        self.assertEqual((str(result), attempts, sleeps), ("example.test/ answered 429", 1, []))
+        self.assertRegex(str(result), r"^example.test is throttling and is left alone until \d\d:\d\d$")
+        self.assertEqual((result.status, attempts, sleeps), (429, 1, []))
         result, attempts, _ = self.fetch(urllib.error.URLError("down"), {"ok": 1})
         self.assertEqual(attempts, 1)
 
@@ -116,6 +117,20 @@ class Fetch(unittest.TestCase):
         with mock.patch.object(net.time, "sleep", lambda pause: None):
             net._wait_turn("example.test", net.GAP)
         self.assertEqual(json.loads(net.PACE_FILE.read_text())["example.test"]["count"], 1)
+
+    def test_a_host_that_throttles_every_attempt_is_left_alone_by_this_run_and_the_next(self):
+        result, attempts, _ = self.fetch(*[http_error(429)] * 4, {"ok": 1})
+        self.assertRegex(str(result), r"^example.test is throttling and is left alone until \d\d:\d\d$")
+        self.assertEqual(attempts, 4)
+        sent = []
+        with mock.patch.object(net.urllib.request, "urlopen", lambda request, timeout: sent.append(request)), mock.patch.object(net.time, "sleep", lambda pause: None):
+            for _ in range(3):  # as later lookups of this run, or a run started afterwards, would ask
+                with self.assertRaisesRegex(RuntimeError, "is throttling and is left alone until"):
+                    net.fetch("https://example.test/")
+            self.assertEqual(sent, [])
+            later = net.time.time() + net.REST + 1
+            with mock.patch.object(net.time, "time", lambda: later), mock.patch.object(net.urllib.request, "urlopen", lambda request, timeout: reply({"ok": 1})):
+                self.assertEqual(net.fetch("https://example.test/"), {"ok": 1})
 
     def test_a_request_whose_failure_is_the_answer_is_made_once(self):
         queue = [http_error(503), {"ok": 1}]
