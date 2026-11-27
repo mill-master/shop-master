@@ -13,13 +13,13 @@ The cheapest shelf price therefore says little. What the shopper needs is the st
 
 ## The tool
 
-`scripts/shopmaster` does the collecting and the arithmetic. It reads the three platforms the way their web sites do, without an account. It never places an order, pays, or touches a cart: the shopper checks out in the app, from the links it prints. Run it with `--help` for the full syntax; one run goes:
+`shopmaster` does the collecting and the arithmetic. It reads the three platforms the way their web sites do, without an account. It does not order, pay, or touch a cart: the shopper checks out in the app, from the links it prints. Run it as `python3 "${CLAUDE_PLUGIN_ROOT}/bin/shopmaster"` (`python` on Windows); the lines below write `shopmaster` for that, and `--help` on it and on each command gives the full syntax. One run goes:
 
 ```
-scripts/shopmaster where                      # the saved delivery point
-scripts/shopmaster gather --want 'milk=milk 1l' --want 'eggs*2=eggs|კვერცხი' --want 'rice=rice'
-scripts/shopmaster pick w1.milk=3 g2.eggs=2x1 b1.rice=-
-scripts/shopmaster solve
+shopmaster where                      # the saved delivery point
+shopmaster gather --want 'milk=milk 1l' --want 'eggs*2=eggs|კვერცხი' --want 'rice=rice'
+shopmaster pick w1.milk=3 g2.eggs=2x1 b1.rice=-
+shopmaster solve
 ```
 
 `gather` searches each platform for every wanted item, takes the stores that matched most of the list, and prints each store with its fee rules and up to eight candidate products per item. A `--want` is `key=query`, with `*N` after the key for a quantity and `|` between alternative queries; keys are plain words. `--food` turns the run to restaurants and dishes. `--add` extends the last run with more wants or with `--store platform:key`, and retries lookups that failed. `pick` says which candidate stands for an item at a store (`=3`), with a quantity that overrides the list's for that store (`=3x2`), or that nothing there fits (`=-`). `drop` removes a store. `solve` ranks the ways to buy the list using at most two orders (`--max-stores` changes that) and prints the best few plus the best single order.
@@ -66,4 +66,4 @@ Prices, stock and opening state are as of the run's time, printed at the top of 
 
 ## When something breaks
 
-The platforms' web interfaces are private and change without notice. An adapter that starts failing names the call that failed. `references/platforms.md` records, for each platform, the calls in use, what each was verified to return, the fee measurements behind the rules, and what remains unverified, including what is known of signed-in access.
+The platforms' web interfaces are private and change without notice. An adapter that starts failing names the call that failed. [platforms.md](platforms.md) records, for each platform, the calls in use, what each was verified to return, the fee measurements behind the rules, and what remains unverified, including what is known of signed-in access.

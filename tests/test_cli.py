@@ -8,10 +8,10 @@ from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 from types import SimpleNamespace
 
-SCRIPTS = Path(__file__).resolve().parent.parent / ".claude" / "skills" / "shop-master" / "scripts"
-sys.path.insert(0, str(SCRIPTS))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
 
-loader = SourceFileLoader("shopmaster_cli", str(SCRIPTS / "shopmaster"))
+loader = SourceFileLoader("shopmaster_cli", str(ROOT / "bin" / "shopmaster"))
 cli = module_from_spec(spec_from_loader(loader.name, loader))
 loader.exec_module(cli)
 

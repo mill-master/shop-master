@@ -1,6 +1,6 @@
 # The three platforms, as read by the adapters
 
-Everything here was observed on 2026-11-27 from a connection in Tbilisi, for a delivery point at Freedom Square (41.6938, 44.8015), without an account. Amounts are in tetri unless a field is marked as lari. Each adapter in `scripts/` holds the request details; this page holds what was learned that the code alone does not show.
+Everything here was observed on 2026-11-27 from a connection in Tbilisi, for a delivery point at Freedom Square (41.6938, 44.8015), without an account. Amounts are in tetri unless a field is marked as lari. Each platform's adapter (`lib/wolt.py`, `lib/glovo.py`, `lib/bolt.py`) holds the request details; this page holds what was learned that the code alone does not show.
 
 ## Connectors and MCP servers
 

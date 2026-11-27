@@ -11,10 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-import bolt
-import glovo
-import solver
-import wolt
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import bolt  # noqa: E402
+import glovo  # noqa: E402
+import solver  # noqa: E402
+import wolt  # noqa: E402
 
 PLATFORMS = {"wolt": wolt, "glovo": glovo, "bolt": bolt}
 POINT_FILE = Path.home() / ".config" / "shop-master" / "point.json"

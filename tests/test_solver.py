@@ -2,7 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / ".claude" / "skills" / "shop-master" / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 import solver  # noqa: E402
 
