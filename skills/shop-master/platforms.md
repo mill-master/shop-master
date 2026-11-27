@@ -163,7 +163,7 @@ As the platforms describe them on their own pages; none of it is computed.
 
 ## Signed-in access
 
-The calls in this section are read from the code of each platform's own web site, and where one was also tried signed out, its answer is given. On 2026-11-27 one real account tried the routes, and what that showed is marked "seen with a real account"; the rest is unconfirmed. Three open-source Wolt clients were read as well: the unofficial servers `erlaufer/wolt-mcp` and `mekedron/wolt-mcp`, and `mekedron/wolt-cli`, on which the second is built.
+The calls in this section are read from the code of each platform's own web site, and where one was also tried signed out, its answer is given. On 2026-11-27 one real account tried the routes, and what that showed is marked "seen with a real account"; the rest is unconfirmed. A reply that has not been seen is not trusted to have the form the code expects: a sign-in step answered in another form stops with a message naming what was missing, a token renewal keeps a new refresh token whatever else its reply holds, and a basket priced for an account in a form the tool cannot follow is priced as a visitor's, with a note. Three open-source Wolt clients were read as well: the unofficial servers `erlaufer/wolt-mcp` and `mekedron/wolt-mcp`, and `mekedron/wolt-cli`, on which the second is built.
 
 With an account, and in a run the shopper chose to make signed in, the tool prices a basket on Wolt; on Wolt and Glovo it reads who is signed in and whether a subscription shows. It fills no cart. The basket and checkout calls noted below are what was learned towards that. No basket has yet been priced for a real account.
 
