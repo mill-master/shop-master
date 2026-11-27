@@ -136,7 +136,7 @@ class Wolt(unittest.TestCase):
 class WoltAccountPricing(unittest.TestCase):
     """The account is asked to price a finished basket and nothing else, and is left alone at the first pushback."""
 
-    STORE = {"venue_id": "v", "currency": "GEL", "country": "GEO", "offer_ids": ["everyone"], "every_offer_id": ["everyone", "members"]}
+    STORE = {"venue_id": "v", "currency": "GEL", "country": "GEO", "scale": 1, "offer_ids": ["everyone"], "every_offer_id": ["everyone", "members"]}
     ROWS = {"checkout_rows": [{"template": "amount_row", "label": "Item subtotal", "amount": {"amount": 500}}]}
     LINES = [({"id": "milk", "base": 500, "price": 500}, 1)]
 
@@ -188,7 +188,7 @@ class Glovo(unittest.TestCase):
 
     def sign_in(self, table, *typed):
         calls = []
-        table = {"addresslookup": self.PLACE, "identity/v4/devices": {"urn": "glv:device:1"}, **table}
+        table = {"addresslookup": self.PLACE, "seo-content": {}, "identity/v4/devices": {"urn": "glv:device:1"}, **table}
         with mock.patch.object(glovo, "fetch", recording(table, calls)), mock.patch.dict(glovo._places, clear=True):
             return glovo.sign_in(answers(*typed), lambda text: None, *POINT), calls
 
@@ -215,7 +215,7 @@ class Glovo(unittest.TestCase):
     def test_signed_in_requests_carry_the_device_and_a_bare_token_renewed_when_lapsing(self):
         account, kept = {"device_urn": "glv:device:1", "access_token": token(20), "refresh_token": "r1"}, []
         fresh = token(1200)
-        table = {"addresslookup": self.PLACE, "oauth/refresh": {"accessToken": fresh, "refreshToken": "r2"}}
+        table = {"addresslookup": self.PLACE, "seo-content": {}, "oauth/refresh": {"accessToken": fresh, "refreshToken": "r2"}}
         with mock.patch.object(glovo, "fetch", recording(table, [])), mock.patch.dict(glovo._places, clear=True), \
                 mock.patch.object(glovo, "ACCOUNT", account), mock.patch.object(glovo, "keep", lambda: kept.append(dict(account))):
             headers = glovo._headers(*POINT, True, account=True)

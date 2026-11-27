@@ -5,6 +5,7 @@ Glovo prices a basket only for a signed-in customer. The service fee, the small-
 
 import json
 import re
+import threading
 import time
 import unicodedata
 from urllib.parse import quote as urlquote, unquote
@@ -40,18 +41,35 @@ CLIENT = str(uuid4())
 STARTED = str(int(time.time() * 1000))
 
 FOOD_CATEGORY = "1"  # Glovo's category number for restaurants
+GROCERIES = "4"
 
 # The signed-in session, when there is one, and what to call after it changes so that it is kept. Both are set by the command-line tool.
 ACCOUNT = None
 keep = lambda: None  # noqa: E731
 
 _places = {}
+_placing = threading.Lock()
 
 
 def place(lat, lon):
-    """Glovo's own reading of the delivery point: its city and country codes and the city's name."""
-    if (lat, lon) not in _places:
-        _places[lat, lon] = fetch(f"{API}/v3/addresslookup/pub/coordinates?latitude={lat}&longitude={lon}&allowFallback=true", _headers(lat, lon))
+    """Glovo's own reading of the delivery point: its city and country codes and the city's name. Refuses a point in a country Glovo is not in."""
+    with _placing:  # searches start together, and the first to ask settles the point for all of them
+        if (lat, lon) not in _places:
+            found = fetch(f"{API}/v3/addresslookup/pub/coordinates?latitude={lat}&longitude={lon}&allowFallback=true", _headers(lat, lon))
+            # Glovo names a city for any point on earth. Where it does not operate it has no page for the country and no server answers a search,
+            # which a patient request would find out over a minute of retries for every search; the two together are taken as the answer.
+            try:
+                fetch(f"{API}/seo-content/locales/en/countries/{found['countryCode'].lower()}", _headers(lat, lon))
+            except RuntimeError as no_page:
+                if getattr(no_page, "status", None) == 404:
+                    located = {**_headers(lat, lon), "glovo-location-city-code": found["cityCode"], "glovo-location-country-code": found["countryCode"]}
+                    try:
+                        fetch(f"{API}/v1/web/store_wall/search?searchQuery=a", located, {"searchContext": {"searchId": str(uuid4())}}, patient=False)
+                    except RuntimeError as no_server:
+                        found["absent"] = getattr(no_server, "status", None) == 503
+            _places[lat, lon] = found
+    if _places[lat, lon].get("absent"):
+        raise RuntimeError(f"Glovo does not operate in {_places[lat, lon]['addressComponents'].get('country') or _places[lat, lon]['countryCode']}")
     return _places[lat, lon]
 
 
@@ -103,12 +121,22 @@ def _minor(lari):
 
 
 def discover(query, lat, lon, food):
-    """Products matching `query`, store by store (restaurant by restaurant for `food`). Glovo answers with its search screen: a card per store, followed by a row of that store's matching products."""
-    category = f"&categoryId={FOOD_CATEGORY}" if food else ""
-    reply = fetch(f"{API}/v1/web/store_wall/search?searchQuery={urlquote(query)}{category}", _headers(lat, lon, True),
-                  {"searchContext": {"searchId": str(uuid4())}})
+    """Products matching `query`, store by store (restaurant by restaurant for `food`). Glovo answers with its search screen: a card per store, followed by a row of that store's matching products.
+
+    A search across every kind of store shows products only for the stores it ranks first, and for a word that is also a dish those are restaurants. Stores are therefore searched twice: across every kind, which finds pharmacies and other shops, and among the groceries alone.
+    """
+    hits = []
+    for category in ([FOOD_CATEGORY] if food else [None, GROCERIES]):
+        reply = fetch(f"{API}/v1/web/store_wall/search?searchQuery={urlquote(query)}" + (f"&categoryId={category}" if category else ""),
+                      _headers(lat, lon, True), {"searchContext": {"searchId": str(uuid4())}})
+        hits += [hit for hit in _cards(reply["data"]["body"]["data"]["elements"], food) if hit not in hits]
+    return hits
+
+
+def _cards(elements, food):
+    """The products on a search screen, each with the store whose card stands before its row."""
     hits, card = [], None
-    for element in reply["data"]["body"]["data"]["elements"]:
+    for element in elements:
         if element["type"] == "STORE_CARD_V2":
             state = _find(element, "shopIsOpen")  # the card's display event carries the store's state
             if not state:

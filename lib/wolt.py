@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, quote as urlquote, unquote, urlsplit
 from uuid import uuid4
 
 from net import fetch, lapses
-from units import measure
+from units import measure, money
 
 SEARCH = "https://restaurant-api.wolt.com/v1/pages/search"
 AUTH = "https://authentication.wolt.com"
@@ -141,7 +141,10 @@ def shelf(store, query, lat, lon, limit=8):
             if cut["units"] <= 1:
                 offer["price"] -= off
             else:
-                offer["bulk"] = [cut["units"], off]
+                offer["bulk"] = [cut["units"], off * store["scale"]]
+        for amount in ("base", "price", "list", "extra"):
+            if amount in offer:
+                offer[amount] *= store["scale"]
         offers.append(offer)
         if len(offers) == limit:
             break
@@ -169,13 +172,13 @@ def quote(store, lines, lat, lon):
 
     Returns what Wolt charges for the goods once the offers that apply are taken off, the fees as (label, amount) pairs, the names of the offers applied, whether the pricing was the account's own, and a note when the account had to be left out.
     """
-    items = []
+    items, scale = [], store["scale"]
     for offer, count in lines:
-        each = offer["base"] + offer.get("extra", 0)
+        base, each = offer["base"] // scale, (offer["base"] + offer.get("extra", 0)) // scale  # back in Wolt's own units
         if offer.get("weighed"):
             items.append({"id": offer["id"], "count": 1, "base_price": each * count, "end_amount": each * count, "is_weighted_item": True})
         else:
-            items.append({"id": offer["id"], "count": count, "base_price": offer["base"], "end_amount": each * count, "options": offer.get("choices", [])})
+            items.append({"id": offer["id"], "count": count, "base_price": base, "end_amount": each * count, "options": offer.get("choices", [])})
         if offer.get("category"):
             items[-1]["category_id"] = offer["category"]
     resting = (ACCOUNT or {}).get("resting")
@@ -197,10 +200,15 @@ def quote(store, lines, lat, lon):
         if row.get("template") != "amount_row":
             continue
         if row["label"] == "Item subtotal":
-            priced["goods"] = row["amount"]["amount"]
+            priced["goods"] = row["amount"]["amount"] * scale
         else:
-            priced["fees"].append((row["label"], row["amount"]["amount"]))
+            priced["fees"].append((row["label"], row["amount"]["amount"] * scale))
     return priced
+
+
+def stand_in(offer):
+    """Whether a store offer is published as a discount of one smallest unit: Wolt's way of listing a deal that needs a code or pays in loyalty points."""
+    return (offer["effects"].get("basket_discount") or {}).get("amount") == 1
 
 
 def audience(offer):
@@ -279,7 +287,7 @@ def store(key, lat, lon):
     static = fetch(f"{ORDER_XP}/v1/pages/venue/slug/{urlquote(key)}/static", HEADERS)["venue"]
     dynamic = fetch(f"{ORDER_XP}/v1/venue/slug/{urlquote(key)}/dynamic/?lat={lat}&lon={lon}", HEADERS)
     venue, raw = dynamic["venue"], dynamic["venue_raw"]
-    campaigns = [campaign for campaign in raw.get("discounts", []) if not audience(campaign)]
+    campaigns = [campaign for campaign in raw.get("discounts", []) if not audience(campaign) and not stand_in(campaign)]
     record = {
         "name": static["name"].strip(),
         "url": static["share_url"],
@@ -293,7 +301,7 @@ def store(key, lat, lon):
         "caveat": None,
         # Every campaign a returning customer may use goes to checkout with each basket; checkout applies those that fit.
         "offer_ids": [campaign["id"] for campaign in campaigns],
-        "every_offer_id": [campaign["id"] for campaign in raw.get("discounts", [])],
+        "every_offer_id": [campaign["id"] for campaign in raw.get("discounts", []) if not stand_in(campaign)],
         "item_offers": {},
         "category_offers": {},
         "notes": [],
@@ -313,6 +321,10 @@ def store(key, lat, lon):
     distance = next((re.search(r"\((.+)\)", row["label"]) for row in priced["checkout_rows"]
                      if row.get("template") == "amount_row" and row["label"].startswith("Delivery")), None)
     record["distance"] = distance.group(1) if distance else None
+    # Wolt states amounts in a currency's smallest unit, which for a krona is the krona itself, while this tool reckons every platform in hundredths.
+    # What this store's amounts are to be multiplied by is read off Wolt's own wording of one: 869 beside "ISK869", 159 beside "GEL1.59".
+    stated = max((row["amount"] for row in priced["checkout_rows"] if row.get("template") == "amount_row"), key=lambda amount: amount["amount"])
+    record["scale"] = 100 if stated["amount"] and stated.get("formatted_amount") and money(stated["formatted_amount"]) / stated["amount"] > 50 else 1
     away = re.fullmatch(r"([\d.]+) (k?)m", record["distance"] or "")
     metres = float(away.group(1)) * (1000 if away.group(2) else 1) if away else None
     specs = raw["delivery_specs"]
@@ -327,6 +339,9 @@ def store(key, lat, lon):
         if not (offer["effects"].get("basket_discount") or offer["effects"].get("delivery_discount")):
             continue
         title, limited = offer["description"]["title"], audience(offer)
+        if stand_in(offer):
+            record["notes"].append(f"offer: {title} (needs a code or pays in points; not counted)")
+            continue
         segments = None if limited else offer_segments(offer, priced["telemetry"]["delivery_price"], metres)
         if segments:
             record["fees"].append({"label": f"Offer: {title}", "segments": segments})
@@ -334,6 +349,8 @@ def store(key, lat, lon):
                                                     else " (applied when Wolt prices the basket)"))
     if record["item_offers"] or record["category_offers"]:
         record["notes"].append("products here are under store campaigns; a candidate's price already has its discount, or says from how many units it applies")
+    for fee in record["fees"]:
+        fee["segments"] = [[low * record["scale"], high and high * record["scale"], fixed * record["scale"], share] for low, high, fixed, share in fee["segments"]]
     return record
 
 

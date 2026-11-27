@@ -80,10 +80,10 @@ def _reply(raw):
         return raw.decode(errors="replace")[:300]
 
 
-def fetch(url, headers=None, body=None, form=None, timeout=40, acting=False):
+def fetch(url, headers=None, body=None, form=None, timeout=40, acting=False, patient=True):
     """GET `url`, or POST `body` as JSON or `form` as a web form when one is given. Returns the decoded JSON reply.
 
-    `acting` marks a request made for a signed-in account, or one that signs in: it is paced more widely and never repeated, so that a throttled or refused account is left alone and a code is never sent twice.
+    `acting` marks a request made for a signed-in account, or one that signs in: it is paced more widely and never repeated, so that a throttled or refused account is left alone and a code is never sent twice. A request that is not `patient` is likewise made once: its failure is itself the answer wanted.
 
     A failure is raised as RuntimeError naming the host and path, with the cause chained. For a refusal it also carries the answer: `status`, and `reply` with what the host said.
     """
@@ -98,7 +98,7 @@ def fetch(url, headers=None, body=None, form=None, timeout=40, acting=False):
 
     target = urlsplit(url)
     host, call = target.netloc, f"{target.netloc}{target.path}"
-    attempts = 1 if acting else ATTEMPTS
+    attempts = ATTEMPTS if patient and not acting else 1
     for attempt in range(attempts):
         _wait_turn(host, ACCOUNT_GAP if acting else GAP, acting)
         try:

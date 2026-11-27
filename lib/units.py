@@ -6,13 +6,14 @@ A size is a pair [amount, unit] with the unit one of "g", "ml" and "pc", so that
 import re
 from math import ceil
 
-# Spellings met on the three platforms' shelves, Georgian and Latin, with the factor that turns each into its base unit.
+# Spellings met on the three platforms' shelves, in Latin, Georgian and Cyrillic letters, with the factor that turns each into its base unit.
 UNITS = {
-    "kg": (1000, "g"), "კგ": (1000, "g"),
-    "g": (1, "g"), "gr": (1, "g"), "გრ": (1, "g"), "გ": (1, "g"),
-    "l": (1000, "ml"), "lt": (1000, "ml"), "ლ": (1000, "ml"),
-    "ml": (1, "ml"), "მლ": (1, "ml"),
+    "kg": (1000, "g"), "კგ": (1000, "g"), "кг": (1000, "g"),
+    "g": (1, "g"), "gr": (1, "g"), "გრ": (1, "g"), "გ": (1, "g"), "г": (1, "g"), "гр": (1, "g"),
+    "l": (1000, "ml"), "lt": (1000, "ml"), "ltr": (1000, "ml"), "ლ": (1000, "ml"), "л": (1000, "ml"),
+    "ml": (1, "ml"), "მლ": (1, "ml"), "мл": (1, "ml"),
     "pcs": (1, "pc"), "pc": (1, "pc"), "pieces": (1, "pc"), "ცალიანი": (1, "pc"), "ცალი": (1, "pc"), "ც": (1, "pc"),
+    "szt": (1, "pc"), "ks": (1, "pc"), "uds": (1, "pc"), "шт": (1, "pc"),
 }
 # A pack up to a tenth under the amount asked still answers it: 950 ml and 900 g packs are sold as the litre and the kilo.
 SHORT = 0.9

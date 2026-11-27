@@ -117,6 +117,16 @@ class Fetch(unittest.TestCase):
             net._wait_turn("example.test", net.GAP)
         self.assertEqual(json.loads(net.PACE_FILE.read_text())["example.test"]["count"], 1)
 
+    def test_a_request_whose_failure_is_the_answer_is_made_once(self):
+        queue = [http_error(503), {"ok": 1}]
+
+        def urlopen(request, timeout):
+            raise queue.pop(0)
+        with mock.patch.object(net.urllib.request, "urlopen", urlopen), mock.patch.object(net.time, "sleep", lambda pause: None), \
+                self.assertRaisesRegex(RuntimeError, "answered 503"):
+            net.fetch("https://example.test/", patient=False)
+        self.assertEqual(len(queue), 1)
+
     def test_a_refusal_is_not_retried(self):
         result, attempts, _ = self.fetch(http_error(403), {"ok": 1})
         self.assertEqual((str(result), result.__cause__.code, attempts), ("example.test/ answered 403", 403, 1))

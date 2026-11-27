@@ -40,7 +40,12 @@ def discover(query, lat, lon, food):
     """Items matching `query`, provider by provider: Bolt's search names the stores (or, for `food`, the restaurants), and a second call previews what matched in each."""
     where = {"delivery_lat": lat, "delivery_lng": lon}
     tab = "restaurants" if food else "stores"
-    providers = call("deliverySearch", {**where, "search_string": query, "filters": [], "search_tab_id": tab})["providers"][:PREVIEWED]
+    try:
+        providers = call("deliverySearch", {**where, "search_string": query, "filters": [], "search_tab_id": tab})["providers"][:PREVIEWED]
+    except RuntimeError as refusal:
+        if "CITY_NOT_FOUND" in str(refusal):
+            raise RuntimeError("Bolt Food does not deliver to this point") from refusal
+        raise
     hits = []
     for start in range(0, len(providers), PREVIEW_BATCH):
         batch = providers[start:start + PREVIEW_BATCH]

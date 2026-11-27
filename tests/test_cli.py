@@ -291,6 +291,34 @@ class Gather(unittest.TestCase):
         _, run = self.gather("milk", "eggs", closed=True)
         self.assertEqual(self.stores(run), {"s1": "full"})
 
+    def test_a_platform_that_is_not_at_this_point_says_so_once(self):
+        def nowhere(query, lat, lon, food):
+            raise RuntimeError("Elsewhere does not deliver to this point")
+        cli.PLATFORMS = {"shop": shop(self.shelves), "elsewhere": SimpleNamespace(discover=nowhere)}
+        report, run = self.gather("milk", "eggs")
+        self.assertEqual(self.stores(run), {"s1": "full"})
+        self.assertEqual([line for line in report.splitlines() if "elsewhere" in line], ["! elsewhere: Elsewhere does not deliver to this point"])
+
+    def test_a_search_that_failed_among_others_that_worked_is_named(self):
+        searches = shop(self.shelves)
+
+        def flaky(query, lat, lon, food):
+            if query == "eggs":
+                raise RuntimeError("shop.example.test/search answered 500")
+            return searches.discover(query, lat, lon, food)
+        cli.PLATFORMS = {"shop": SimpleNamespace(discover=flaky, store=searches.store, shelf=searches.shelf)}
+        report, _ = self.gather("milk", "eggs")
+        self.assertIn("! shop: cross-store search for 'eggs' failed (shop.example.test/search answered 500)", report)
+
+    def test_fees_are_sampled_around_the_store_s_own_minimum_whatever_the_currency(self):
+        forints = store("shop", "Budapest", {}, delivery=79900, minimum=300000)
+        self.assertEqual(cli.sample_baskets(forints), [120000, 300000, 600000, 1200000])
+        self.assertEqual(cli.sample_baskets(store("shop", "Tbilisi", {})), [1000, 2500, 5000, 10000])
+        flat = {"fees": [{"label": "Delivery", "segments": [[0, None, 229, 0]]}]}
+        self.assertEqual(cli.sample_baskets(flat), [])
+        report, _ = self.gather("milk")
+        self.assertIn("fees (Delivery, Small order) by basket: 10.00→17.50  25.00→2.50  50.00→2.50  100.00→2.50", report)
+
     def test_a_store_whose_read_failed_is_replaced_now_and_read_on_the_next_add(self):
         cli.PLATFORMS = {"shop": shop(self.shelves, broken=["full"])}
         report, run = self.gather("milk", "eggs")

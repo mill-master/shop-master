@@ -30,7 +30,7 @@ def cut(fraction=None, units=1, amount=None, base_only=False):
 
 
 class WoltShelf(unittest.TestCase):
-    STORE = {"key": "market", "item_offers": {"shampoo": cut(0.3), "franui": cut(0.3, units=2), "razor": cut(amount=300), "set": cut(0.32, base_only=True)},
+    STORE = {"key": "market", "scale": 1, "item_offers": {"shampoo": cut(0.3), "franui": cut(0.3, units=2), "razor": cut(amount=300), "set": cut(0.32, base_only=True)},
              "category_offers": {"sweets": cut(0.3)}}
     REPLY = {
         "categories": [{"id": "dairy", "item_ids": ["milk"]}, {"id": "all", "item_ids": ["wafer"]}, {"id": "sweets", "item_ids": ["wafer"]}],
@@ -88,9 +88,18 @@ class WoltShelf(unittest.TestCase):
         self.assertEqual((dish["price"], dish["base"], dish["extra"], dish["from"]), (4036, 200, 3900, True))
         self.assertEqual(dish["choices"], [{"id": "b1", "values": [{"id": "v2", "count": 3, "price": 1300}]}])
 
+    def test_amounts_wolt_states_in_whole_units_are_kept_in_hundredths(self):
+        # Measured in Reykjavik: Wolt states a milk at 355 kronur as 355, where it states one at 3.55 lari as 355 too.
+        with mock.patch.object(wolt, "fetch", answering({"items/search": self.REPLY})):
+            offers = {offer["id"]: offer for offer in wolt.shelf({**self.STORE, "scale": 100}, "anything", *POINT)}
+        self.assertEqual((offers["milk"]["price"], offers["milk"]["list"], offers["milk"]["base"]), (54900, 62500, 54900))
+        self.assertEqual((offers["razor"]["price"], offers["franui"]["bulk"]), (120000, [2, 73500]))
+        dish = offers["set"]
+        self.assertEqual((dish["price"], dish["extra"], dish["choices"][0]["values"][0]["price"]), (403600, 390000, 1300))  # the choices go back to Wolt as it stated them
+
 
 class WoltPricing(unittest.TestCase):
-    STORE = {"venue_id": "v", "currency": "GEL", "country": "GEO", "offer_ids": ["c1"], "every_offer_id": ["c1", "new-customers"]}
+    STORE = {"venue_id": "v", "currency": "GEL", "country": "GEO", "scale": 1, "offer_ids": ["c1"], "every_offer_id": ["c1", "new-customers"]}
 
     def row(self, label, amount, original=None):
         return {"template": "amount_row", "label": label, "amount": {"amount": amount}, "original_amount": {"amount": original} if original else None}
@@ -107,6 +116,15 @@ class WoltPricing(unittest.TestCase):
         plan = sent["purchase_plan"]
         self.assertEqual(plan["use_promo_discount_ids"], ["c1"])
         self.assertEqual({k: plan["menu_items"][0][k] for k in ("id", "count", "base_price", "end_amount")}, {"id": "franui", "count": 2, "base_price": 2450, "end_amount": 4900})
+
+    def test_a_store_in_whole_units_is_asked_in_them_and_answered_in_hundredths(self):
+        rows = [self.row("Item subtotal", 710), self.row("Delivery (2.1 km)", 869)]
+        sent = {}
+        with mock.patch.object(wolt, "fetch", answering({"pages/checkout": lambda body: sent.update(body) or {"checkout_rows": rows}})):
+            priced = wolt.quote({**self.STORE, "scale": 100}, [({"id": "milk", "base": 35500, "price": 35500}, 2)], *POINT)
+        line = sent["purchase_plan"]["menu_items"][0]
+        self.assertEqual((line["base_price"], line["end_amount"]), (355, 710))
+        self.assertEqual((priced["goods"], priced["fees"]), (71000, [("Delivery (2.1 km)", 86900)]))
 
     def test_a_line_names_its_shelf_category_which_checkout_matches_campaigns_on(self):
         sent = {}
@@ -144,13 +162,14 @@ class WoltStore(unittest.TestCase):
                    "venue_raw": {"discounts": campaigns, "delivery_specs": {"order_minimum_no_surcharge": 2500, "delivery_pricing": {"price_ranges": [
                        {"min": 0, "max": 1250, "a": 1350, "b": -1.0}, {"min": 1250, "max": 6238, "a": 0, "b": 0.08}, {"min": 6238, "max": 0, "a": 499, "b": 0.0}]}}}}
         static = {"venue": {"name": " Market ", "share_url": "https://wolt.com/x", "currency": "GEL", "id": "v", "country": "GEO", "rating": {"score": "9.4"}}}
-        probe = {"checkout_rows": [{"template": "amount_row", "label": "Delivery (610 m)", "amount": {"amount": 259}}],
+        probe = {"checkout_rows": [{"template": "amount_row", "label": "Delivery (610 m)", "amount": {"amount": 259, "formatted_amount": "GEL2.59"}}],
                  "telemetry": {"delivery_price": 259, "small_order_fee": 399}, "purchase_validation": {"bag_fee": 40}}
         sent = {}
         table = {"/static": static, "/dynamic/": dynamic, "pages/checkout": lambda body: sent.update(body) or probe}
         with mock.patch.object(wolt, "fetch", answering(table)):
             record = wolt.store("market", *POINT)
         self.assertEqual((record["name"], record["open"], record["eta"], record["distance"], record["rating"]), ("Market", True, "30-40 min", "610 m", "9.4"))
+        self.assertEqual((record["scale"], record["fees"][0]["segments"]), (1, [[0, None, 259, 0]]))
         self.assertEqual(record["offer_ids"], ["30% off shampoo", "2x Franui", "Blue Friday", "3 GEL off", "Combo", "GEL10 off on orders over GEL60"])
         self.assertEqual(sorted(record["every_offer_id"]), sorted(record["offer_ids"] + ["Members' shelf", "GEL0 delivery fee"]))
         self.assertEqual(sent["purchase_plan"]["use_promo_discount_ids"], record["offer_ids"])
@@ -160,6 +179,34 @@ class WoltStore(unittest.TestCase):
         self.assertEqual(record["fees"][2]["on"], "list")
         self.assertIn("offer: GEL10 off on orders over GEL60 (counted in the totals)", record["notes"])
         self.assertIn("offer: GEL0 delivery fee (new customers; not counted)", record["notes"])
+
+    def read_store(self, campaigns, delivery):
+        """A store read from Wolt, with these campaigns and this wording of its delivery price."""
+        dynamic = {"venue": {"delivery_open_status": {"is_open": True}, "online": True, "open_status": {"value": "Open"}, "delivery_configs": []},
+                   "venue_raw": {"discounts": campaigns, "delivery_specs": {"order_minimum_no_surcharge": 3000, "delivery_pricing": {"price_ranges": [
+                       {"min": 0, "max": 0, "a": 259, "b": 0.0}]}}}}
+        static = {"venue": {"name": "Market", "share_url": "https://wolt.com/x", "currency": "ISK", "id": "v", "country": "ISL"}}
+        probe = {"checkout_rows": [{"template": "amount_row", "label": "Item subtotal", "amount": {"amount": 1, "formatted_amount": delivery[:3] + "0"}},
+                                   {"template": "amount_row", "label": "Delivery (2.1 km)", "amount": {"amount": 869, "formatted_amount": delivery}}],
+                 "telemetry": {"delivery_price": 869, "small_order_fee": 699}, "purchase_validation": {"bag_fee": 0}}
+        with mock.patch.object(wolt, "fetch", answering({"/static": static, "/dynamic/": dynamic, "pages/checkout": probe})):
+            return wolt.store("market", *POINT)
+
+    def test_a_currency_stated_in_whole_units_is_recognised_from_wolt_s_own_wording(self):
+        # Measured in Reykjavik and Budapest: 869 beside "ISK869" is 869 kronur, and 223,700 beside "HUF2,237" is 2,237 forints.
+        kronur = self.read_store([], "ISK869")
+        self.assertEqual(kronur["scale"], 100)
+        self.assertEqual(kronur["fees"][0], {"label": "Delivery", "segments": [[0, None, 86900, 0]]})
+        self.assertEqual(kronur["fees"][2]["segments"], [[0, 230100, 69900, 0], [230100, 300000, 300000, -1]])
+        self.assertEqual(self.read_store([], "HUF8.69")["scale"], 1)
+
+    def test_an_offer_published_as_one_smallest_unit_is_listed_and_not_counted(self):
+        # Measured in Tel Aviv: "25 off with code" is published as a discount of one agora, which checkout would take off.
+        coded = self.campaign("₪25 off with code BF25W", {"basket_discount": {"amount": 1}})
+        record = self.read_store([coded], "ISK869")
+        self.assertEqual((record["offer_ids"], record["every_offer_id"]), ([], []))
+        self.assertEqual(record["notes"], ["offer: ₪25 off with code BF25W (needs a code or pays in points; not counted)"])
+        self.assertEqual([fee["label"] for fee in record["fees"]], ["Delivery", "Service fee", "Small order fee"])
 
     def test_free_delivery_within_a_distance_counts_for_a_store_that_near(self):
         # Measured at Farmers Market Vera: delivery 3.09 under 20.00 of goods and nothing from 20.00, for a store within 5 km.
@@ -223,6 +270,11 @@ class BoltShelf(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Bolt searchInMenu: INVALID_REQUEST"):
                 bolt.shelf({"key": "1"}, "x", *POINT)
 
+    def test_a_point_bolt_does_not_serve_is_said_in_plain_words(self):
+        with mock.patch.object(bolt, "fetch", answering({"deliverySearch": {"code": 4500, "message": "CITY_NOT_FOUND"}})):
+            with self.assertRaisesRegex(RuntimeError, "^Bolt Food does not deliver to this point$"):
+                bolt.discover("milk", 64.1466, -21.9426, False)
+
     def test_the_search_previews_what_matched_in_each_provider(self):
         providers = [{"id": 7, "name": " GPC ", "availability": {"delivery": {"instant": True}}}, {"id": 8, "name": "Closed", "availability": {"delivery": {"instant": False}}}]
         sent = {}
@@ -247,7 +299,7 @@ class Glovo(unittest.TestCase):
     def search(self, food):
         elements = [{"type": "DISCLAIMERS", "data": {}}, self.card("spar", "4"), self.row("4,49 ₾", "5,60 ₾"), self.card("cafe", "1"), self.row("14,00 ₾"),
                     self.card("night", "4", "false"), self.row("3,00 ₾"), self.card("nameonly", "4")]
-        table = {"addresslookup": self.PLACE, "store_wall/search": {"data": {"body": {"data": {"elements": elements}}}}}
+        table = {"addresslookup": self.PLACE, "seo-content": {}, "store_wall/search": {"data": {"body": {"data": {"elements": elements}}}}}
         with mock.patch.object(glovo, "fetch", answering(table)), mock.patch.dict(glovo._places, clear=True):
             return glovo.discover("milk", *POINT, food)
 
@@ -257,9 +309,42 @@ class Glovo(unittest.TestCase):
             {"store": "night", "name": "NIGHT", "open": False, "price": 300}])
         self.assertEqual(self.search(True), [{"store": "cafe", "name": "CAFE", "open": True, "price": 1400}])
 
+    def test_stores_are_searched_across_every_kind_and_among_the_groceries_alone(self):
+        # Measured in Barcelona: "huevos" across every kind showed products for restaurants only, and for 22 grocery stores once groceries were asked for.
+        asked = []
+
+        def screen(url):
+            asked.append(url.split("search?")[1])
+            store = "mercadona" if "categoryId=4" in url else "farmacia"
+            return {"data": {"body": {"data": {"elements": [self.card(store, "4" if store == "mercadona" else "3"), self.row("2,10 €")]}}}}
+        with mock.patch.object(glovo, "fetch", lambda url, headers=None, body=None, **more: self.PLACE if "addresslookup" in url else {} if "seo-content" in url else screen(url)), \
+                mock.patch.dict(glovo._places, clear=True):
+            stores = [hit["store"] for hit in glovo.discover("huevos", *POINT, False)]
+            dishes = glovo.discover("huevos", *POINT, True)
+        self.assertEqual(stores, ["farmacia", "mercadona"])
+        self.assertEqual(asked, ["searchQuery=huevos", "searchQuery=huevos&categoryId=4", "searchQuery=huevos&categoryId=1"])
+        self.assertEqual(dishes, [])
+
+    def test_a_country_glovo_is_not_in_is_said_at_once(self):
+        # Measured for Helsinki: Glovo names a city all the same, has no page for the country, and no server answers a search there.
+        calls = []
+
+        def fetch(url, headers=None, body=None, patient=True, **more):
+            calls.append((url.split("glovoapp.com")[1].split("?")[0], patient))
+            if "addresslookup" in url:
+                return {"cityCode": "SUW", "countryCode": "FI", "addressComponents": {"country": "Finland", "locality": "Helsinki"}}
+            failure = RuntimeError("answered")
+            failure.status = 404 if "seo-content" in url else 503
+            raise failure
+        with mock.patch.object(glovo, "fetch", fetch), mock.patch.dict(glovo._places, clear=True):
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "^Glovo does not operate in Finland$"):
+                    glovo.discover("maito", 60.1699, 24.9384, False)
+        self.assertEqual(calls, [("/v3/addresslookup/pub/coordinates", True), ("/seo-content/locales/en/countries/fi", True), ("/v1/web/store_wall/search", False)])
+
     def test_a_card_without_the_store_s_state_stops_the_search_with_its_name(self):
         elements = [{"type": "STORE_CARD_V2", "data": {"slug": "odd"}}]
-        table = {"addresslookup": self.PLACE, "store_wall/search": {"data": {"body": {"data": {"elements": elements}}}}}
+        table = {"addresslookup": self.PLACE, "seo-content": {}, "store_wall/search": {"data": {"body": {"data": {"elements": elements}}}}}
         with mock.patch.object(glovo, "fetch", answering(table)), mock.patch.dict(glovo._places, clear=True):
             with self.assertRaisesRegex(RuntimeError, "odd"):
                 glovo.discover("milk", *POINT, False)
@@ -274,7 +359,7 @@ class Glovo(unittest.TestCase):
                 {"id": 7, "min": 1, "max": 1, "attributes": [{"priceImpact": 3.9}, {"priceImpact": 1.95}]},
                 {"id": 8, "min": 0, "max": 3, "attributes": [{"priceImpact": 0.5}]}]},
         ]
-        table = {"addresslookup": self.PLACE, "/search?query=": {"results": [{"products": products}]}}
+        table = {"addresslookup": self.PLACE, "seo-content": {}, "/search?query=": {"results": [{"products": products}]}}
         with mock.patch.object(glovo, "fetch", answering(table)), mock.patch.dict(glovo._places, clear=True):
             milk, pizza, eggs, combo = glovo.shelf({"store_id": 1, "address_id": 2}, "x", *POINT)
         self.assertEqual((milk["price"], milk["list"], milk["size"]), (549, 620, [950, "ml"]))
@@ -289,7 +374,7 @@ class Glovo(unittest.TestCase):
                                {"title": "-20%", "type": "BASKET_PERCENTAGE", "description": "whole menu", "minimumBasketSizeCents": 4000, "percentage": 20.0},
                                {"title": "-25%", "type": "BASKET_PERCENTAGE", "description": "whole menu", "minimumBasketSizeCents": 4000, "percentage": 25.0, "prime": True}]}
         ranges = [{"lowerBound": 0.0, "upperBound": 15.0, "upperBoundInfo": {"currencyCode": "GEL"}, "surchargeInfo": {"amount": 1.99}, "surchargeStrategy": "CAPPED"}]
-        table = {"addresslookup": self.PLACE, "/v3/stores/gennaro-tbi": info, "node/store_fees": {"data": {"ranges": ranges}}}
+        table = {"addresslookup": self.PLACE, "seo-content": {}, "/v3/stores/gennaro-tbi": info, "node/store_fees": {"data": {"ranges": ranges}}}
         with mock.patch.object(glovo, "fetch", answering(table)), mock.patch.dict(glovo._places, clear=True):
             record = glovo.store("gennaro-tbi", *POINT)
         self.assertEqual(record["url"], "https://glovoapp.com/en/ge/tbilisi/stores/gennaro-tbi")
@@ -304,7 +389,7 @@ class Glovo(unittest.TestCase):
         info = {"id": 1, "addressId": 2, "name": "Paul", "slug": "paul-barcelona", "open": True, "deliveryFeeInfo": {"fee": 0.99}}
         place = {"cityCode": "BCN", "countryCode": "ES", "addressComponents": {"administrative_area_level_1": "Catalunya", "locality": "Barcelona"}}
         for components, city in ((place["addressComponents"], "barcelona"), ({"locality": "Sant Cugat del Vallès"}, "sant-cugat-del-valles"), ({}, "bcn")):
-            table = {"addresslookup": {**place, "addressComponents": components}, "/v3/stores/paul-barcelona": info, "node/store_fees": {"data": {"ranges": []}}}
+            table = {"addresslookup": {**place, "addressComponents": components}, "seo-content": {}, "/v3/stores/paul-barcelona": info, "node/store_fees": {"data": {"ranges": []}}}
             with self.subTest(city=city), mock.patch.object(glovo, "fetch", answering(table)), mock.patch.dict(glovo._places, clear=True):
                 self.assertEqual(glovo.store("paul-barcelona", 41.3874, 2.1686)["url"], f"https://glovoapp.com/en/es/{city}/stores/paul-barcelona")
 

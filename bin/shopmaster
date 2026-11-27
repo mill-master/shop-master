@@ -30,7 +30,7 @@ POINT_FILE = Path.home() / ".config" / "shop-master" / "point.json"
 RUN_FILE = Path.home() / ".cache" / "shop-master" / "run.json"
 ACCOUNTS_FILE = Path.home() / ".config" / "shop-master" / "accounts.json"
 BROWSER_PROFILE = Path.home() / ".cache" / "shop-master" / "browser"  # exists only while a sign-in through a browser window is under way
-SAMPLE_BASKETS = (1000, 2500, 5000, 10000)
+SAMPLE_AROUND = (0.4, 1, 2, 4)  # basket sizes at which a store's fees are shown, as multiples of its small-order minimum
 CANDIDATES = 8   # products kept per item and store
 ALSO_LISTED = 6  # stores named after the chosen ones, for adding by hand
 ROUNDS = 3       # times a closed or unreadable store is replaced by the next in the ranking
@@ -293,9 +293,10 @@ def gather(args):
     searched = list(run["wants"]) if not args.add else fresh_wants
     tasks = [(platform, key, query) for platform in platforms for key in searched for query in run["wants"][key]["queries"]]
     seen, names = {}, {}
+    refused = {}
     for (platform, key, query), (hits, error) in zip(tasks, pool.map(lambda task: attempt(PLATFORMS[task[0]].discover, task[2], lat, lon, food), tasks)):
         if error:
-            problems.append(f"{platform}: cross-store search for {query!r} failed ({error})")
+            refused.setdefault(platform, {}).setdefault(error, []).append(query)
             continue
         for hit in hits:
             if hit["open"] is False and not args.closed:
@@ -304,6 +305,11 @@ def gather(args):
             cheapest = seen.setdefault((platform, hit["store"]), {})
             cheapest[key] = min(cheapest.get(key, hit["price"]), hit["price"])
 
+    # A platform that gave every search the same answer is not at this point at all, and says so once.
+    away = {platform for platform, reasons in refused.items() if len(reasons) == 1 and sum(map(len, reasons.values())) == sum(1 for task in tasks if task[0] == platform)}
+    for platform, reasons in refused.items():
+        problems += [f"{platform}: {reason}" if platform in away else f"{platform}: cross-store search for {query!r} failed ({reason})"
+                     for reason, queries in reasons.items() for query in (queries[:1] if platform in away else queries)]
     rankings = {platform: rank(seen, platform) for platform in platforms}
     tried = set(held)
 
@@ -332,7 +338,7 @@ def gather(args):
     if not args.add:
         fill([(platform, None) for platform in platforms for _ in range(args.per_platform)])
         for platform in platforms:
-            if not rankings[platform]:
+            if not rankings[platform] and platform not in away:
                 problems.append(f"{platform}: no {'restaurant' if food else 'store'} matched any of the list")
     # Whatever the stores read so far did not match gets a store of its own: a list of several kinds seldom fits the stores that match most of it.
     uncovered = []
@@ -420,6 +426,17 @@ def describe_store(store):
     return " · ".join(parts)
 
 
+def sample_baskets(store):
+    """Basket sizes at which to show a store's fees: around its small-order minimum or, failing one, around the last size at which any of its fees changes.
+
+    A store whose fees are the same at every size has none. Sizes taken from the store's own rules suit its currency, whether a basket there runs to tens or to thousands.
+    """
+    def ends(fees):
+        return [high for fee in fees for _, high, _, _ in fee["segments"] if high]
+    anchor = max(ends(fee for fee in store["fees"] if fee["label"] == "Small order fee") or ends(store["fees"]), default=None)
+    return [round(anchor * part) for part in SAMPLE_AROUND] if anchor else []
+
+
 def describe_run(run):
     when = f"gathered {run['at']}" + (f", extended {run['extended']}" if run.get("extended") else "")
     return f"Run {when} for {run['point']['label'] or 'the saved point'}"
@@ -436,8 +453,9 @@ def show_run(run, only=None):
             continue
         print(f"\n{ref}  {describe_store(store)}")
         print(f"    {store['url']}")
-        samples = "  ".join(f"{money(basket)}→{money(solver.fee_total(store, basket))}" for basket in SAMPLE_BASKETS)
-        print(f"    fees ({', '.join(fee['label'] for fee in store['fees'])}) by basket: {samples}")
+        samples = "  ".join(f"{money(basket)}→{money(solver.fee_total(store, basket))}" for basket in sample_baskets(store))
+        print(f"    fees ({', '.join(fee['label'] for fee in store['fees'])})"
+              + (f" by basket: {samples}" if samples else f": {money(solver.fee_total(store, 0))} whatever the basket"))
         if store.get("caveat"):
             print(f"    caveat: {store['caveat']}")
         for note in store.get("notes", []):

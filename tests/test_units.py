@@ -27,6 +27,16 @@ class Measure(unittest.TestCase):
             "Supremo round rice 800 g/4860101960759 1pc": [800, "g"],
             "Kumis egg farmer 1pc/2000002028093": [1, "pc"],
             "Dila egg white 15 pcs/4860007947052": [15, "pc"],
+            # met abroad: Almaty, Kyiv, Warsaw and Barcelona on Glovo, Prague on Bolt, Reykjavik on Wolt
+            "Яйцо куриное Сары-Булак С1 первая категория 10 шт": [10, "pc"],
+            "Huevo Fresco L Campero Vall Mestral Roig Cartón 6 Uds. (15113806)": [6, "pc"],
+            "Молоко Простоквашино 2,5% 1 Л TETRA PAK/8": [1000, "ml"],
+            "Молоко ультрапастеризованное 925 МЛ": [925, "ml"],
+            "Молоко 0,87 кг": [870, "g"],
+            "Сир кисломолочний 950г": [950, "g"],
+            "Moja Kurka Jaja M 20 szt.": [20, "pc"],
+            "Tesco Čerstvá vejce M 6 ks": [6, "pc"],
+            "Don Simon Soy Milk 1 ltr": [1000, "ml"],
         }
         for name, size in cases.items():
             with self.subTest(name=name):
