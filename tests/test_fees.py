@@ -44,6 +44,38 @@ class WoltSchedule(unittest.TestCase):
         self.assertEqual(amounts(fees, 200)["Small order fee"], 1000)
 
 
+class WoltOffers(unittest.TestCase):
+    """Two offers open to every customer, with the discounts Wolt's checkout gave for them."""
+
+    def offer(self, goods, least, **conditions):
+        return {"effects": {"basket_discount": goods}, "conditions": {"basket_contains": [{"min_amount": least}], **conditions},
+                "description": {"title": "", "points": []}}
+
+    def test_a_percentage_with_a_cap_matches_the_measured_checkout(self):
+        segments = wolt.offer_segments(self.offer({"amount": 0, "fraction": 0.1, "max_amount": 2000}, 5000), 59)
+        self.assertEqual([solver.fee_amount(segments, subtotal) for subtotal in (4000, 6000, 30000)], [0, -600, -2000])
+
+    def test_a_fixed_amount_matches_the_measured_checkout(self):
+        segments = wolt.offer_segments(self.offer({"amount": 5000, "fraction": None, "max_amount": None}, 20000), 99)
+        self.assertEqual([solver.fee_amount(segments, subtotal) for subtotal in (15000, 25000)], [0, -5000])
+
+    def test_an_offer_tied_to_more_than_basket_size_is_left_to_the_pricing(self):
+        self.assertIsNone(wolt.offer_segments(self.offer({"amount": 500}, 0, weekly_time_restrictions=[{"day": 1}]), 99))
+        self.assertIsNone(wolt.offer_segments(self.offer({"amount": 500}, 0, delivery_methods=["takeaway"]), 99))
+
+    def test_free_delivery_above_a_minimum_takes_off_the_delivery_price(self):
+        offer = {"effects": {"delivery_discount": {"amount": 0, "fraction": 1.0}}, "conditions": {"basket_contains": [{"min_amount": 4000}]},
+                 "description": {"title": "", "points": []}}
+        self.assertEqual([solver.fee_amount(wolt.offer_segments(offer, 259), subtotal) for subtotal in (3999, 4000)], [0, -259])
+
+    def test_the_audience_is_read_from_the_condition_or_the_wording(self):
+        offer = self.offer({"amount": 1200}, 3000)
+        self.assertIsNone(wolt.audience(offer))
+        offer["description"]["points"] = ["GEL30 minimum order", "For new users with a local phone number."]
+        self.assertEqual(wolt.audience(offer), "new customers")
+        self.assertEqual(wolt.audience(self.offer({"amount": 1}, 0, has_wolt_plus=True)), "Wolt+ members")
+
+
 class GlovoSchedule(unittest.TestCase):
     """The published numbers of one supermarket; the amounts follow this project's reading of them, which Glovo has not confirmed."""
 

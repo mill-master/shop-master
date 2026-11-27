@@ -1,6 +1,6 @@
 """Glovo, read through the calls its own web client makes. No login is involved.
 
-Glovo prices a basket only for a signed-in customer. The service fee and the small-basket surcharge are therefore built from the parameters it publishes with each store, and have not been checked against a priced order.
+Glovo prices a basket only for a signed-in customer. The service fee, the small-basket surcharge and a store's basket-wide offers are therefore built from the parameters it publishes with each store, and have not been checked against a priced order.
 """
 
 import re
@@ -158,7 +158,18 @@ def store(key, lat, lon):
     surcharges = fetch(f"{API}/v1/stores/{info['id']}/addresses/{info['addressId']}/node/store_fees", headers)["data"]["ranges"]
     found = place(lat, lon)
     city = found["addressComponents"]["administrative_area_level_1"].lower()
-    notes = ["offer: " + offer["title"] + (" (Prime members)" if offer.get("prime") else "") for offer in info.get("promotions", [])]
+    fees = schedule(info["deliveryFeeInfo"]["fee"], info.get("serviceFeeInfo"), surcharges)
+    notes = []
+    for offer in info.get("promotions", []):
+        least = offer.get("minimumBasketSizeCents") or 0
+        text = " ".join(part for part in (offer["title"], offer.get("description")) if part) + (f", baskets from {least / 100:.2f}" if least else "")
+        if offer.get("prime") and "prime" not in text.lower():
+            text += " (Prime members)"
+        # A percentage off the whole basket is the one kind that changes a total and is open to all; offers on single products show in their shelf prices.
+        counted = offer["type"] == "BASKET_PERCENTAGE" and not offer.get("prime")
+        if counted:
+            fees.append({"label": f"Offer: {text}", "segments": [[least, None, 0, -offer["percentage"] / 100]]})
+        notes.append(f"offer: {text}" + (" (counted in the totals)" if counted else ""))
     if info.get("primeAvailable"):
         notes.append("Glovo Prime applies at this store; a member pays less in fees than shown")
     return {
@@ -172,7 +183,7 @@ def store(key, lat, lon):
         "eta": None,
         "distance": info.get("distance"),
         "rating": info.get("rating"),
-        "fees": schedule(info["deliveryFeeInfo"]["fee"], info.get("serviceFeeInfo"), surcharges),
-        "caveat": "service and small-order fees are computed from Glovo's published parameters, not priced by Glovo",
+        "fees": fees,
+        "caveat": "fees and offers are computed from Glovo's published parameters, not priced by Glovo",
         "notes": notes,
     }

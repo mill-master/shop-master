@@ -1,4 +1,4 @@
-"""HTTP for the platform adapters: JSON in and out, paced per host, patient when throttled."""
+"""HTTP for the platform adapters: JSON in and out, paced per host, patient when throttled or cut off."""
 
 import gzip
 import json
@@ -49,3 +49,8 @@ def fetch(url, headers=None, body=None, timeout=40):
                 raise
             asked = error.headers.get("retry-after", "")
             time.sleep(float(asked) if asked.isdigit() else 2.0 * 2 ** attempt)
+        except OSError:
+            # No reply at all: a failed name lookup, a dropped connection, a timeout.
+            if attempt == 3:
+                raise
+            time.sleep(2.0 * 2 ** attempt)

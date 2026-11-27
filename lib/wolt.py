@@ -1,6 +1,6 @@
 """Wolt, read through the calls its own web client makes. No login is involved.
 
-Wolt prices any basket for an anonymous visitor, so a store's fees are read from Wolt's own arithmetic, and a finished basket can be priced exactly.
+Wolt prices any basket for an anonymous visitor, so a store's fees are read from Wolt's own arithmetic, and a finished basket can be priced exactly, the store's standing offers included.
 """
 
 import re
@@ -24,6 +24,7 @@ HEADERS = {
 }
 
 PER_UNITS = {"kilogram": "kg", "litre": "l", "piece": "pc"}
+NEW_CUSTOMER = re.compile(r"new (user|customer)|first order", re.I)
 
 
 def discover(query, lat, lon, food):
@@ -88,16 +89,16 @@ def _checkout(store, lines, lat, lon):
         "delivery_method": "homedelivery",
         "menu_items": items,
         "delivery": {"delivery_coordinates": {"latitude": lat, "longitude": lon}},
-        "use_promo_discount_ids": [], "use_promo_surcharge_ids": [], "payment_methods": [],
+        "use_promo_discount_ids": store["offer_ids"], "use_promo_surcharge_ids": [], "payment_methods": [],
         "courier_tip": 0, "use_loyalty_points_amount": 0,
         "use_cash": False, "use_credits_and_tokens": False, "is_priority_delivery": False, "is_cart": True,
     }})
 
 
 def quote(store, lines, lat, lon):
-    """The fee lines Wolt itself charges on a basket, as (label, amount) pairs. `lines` holds (offer, quantity) pairs.
+    """What Wolt itself adds to and takes off a basket, as (label, amount) pairs. `lines` holds (offer, quantity) pairs.
 
-    Promotions are left out: Wolt offers an anonymous visitor its new-customer deals.
+    The store's offers that are open to every customer are put to Wolt, which applies those the basket qualifies for. It shows a discount on the goods as a lowered subtotal.
     """
     priced = []
     for offer, quantity in lines:
@@ -106,8 +107,55 @@ def quote(store, lines, lat, lon):
         else:
             priced.append((offer["id"], offer["price"], int(quantity)))
     rows = _checkout(store, priced, lat, lon)["checkout_rows"]
-    return [(row["label"], row["amount"]["amount"]) for row in rows
-            if row.get("template") == "amount_row" and row["label"] != "Item subtotal"]
+    applied = [row["label"] for row in rows if row.get("template") == "discount_row"]
+    charges = []
+    for row in rows:
+        if row.get("template") == "price_total_amount_row":
+            break  # what follows the total repeats the offers already counted above it
+        if row.get("template") != "amount_row":
+            continue
+        if row["label"] != "Item subtotal":
+            charges.append((row["label"], row["amount"]["amount"]))
+        elif row.get("original_amount"):
+            charges.append(("Offer: " + "; ".join(applied), row["amount"]["amount"] - row["original_amount"]["amount"]))
+    return charges
+
+
+def audience(offer):
+    """Whom a store offer is limited to, or None when any customer may use it."""
+    if offer["conditions"].get("has_wolt_plus"):
+        return "Wolt+ members"
+    # Wolt marks a new-customer offer in its wording alone.
+    if any(NEW_CUSTOMER.search(point) for point in offer["description"].get("points") or []):
+        return "new customers"
+    return None
+
+
+def offer_segments(offer, delivery):
+    """An offer's discount as solver segments, or None when it depends on more than the basket's size.
+
+    An offer on delivery with no minimum is left to the delivery price Wolt quotes, which already carries it.
+    """
+    conditions = offer["conditions"]
+    needs = conditions.get("basket_contains") or []
+    methods = conditions.get("delivery_methods")
+    if any(value for key, value in conditions.items() if key not in ("basket_contains", "delivery_methods")) \
+            or (methods and "homedelivery" not in methods) \
+            or any(need.get("any_of_items") or need.get("items_from_categories") or need.get("min_quantity") for need in needs):
+        return None
+    low = max((need.get("min_amount") or 0 for need in needs), default=0)
+    goods, carriage = offer["effects"].get("basket_discount"), offer["effects"].get("delivery_discount")
+    if goods and goods.get("fraction"):
+        cap = goods.get("max_amount")
+        if not cap:
+            return [[low, None, 0, -goods["fraction"]]]
+        full = cap / goods["fraction"]  # the subtotal at which the discount reaches its cap
+        return ([[low, full, 0, -goods["fraction"]]] if full > low else []) + [[max(low, full), None, -cap, 0]]
+    if goods:
+        return [[low, None, -goods["amount"], 0]]
+    if carriage and low:
+        return [[low, None, -min(delivery, round(delivery * (carriage.get("fraction") or 0)) + (carriage.get("amount") or 0)), 0]]
+    return None
 
 
 def schedule(minimum, price_ranges, probe):
@@ -156,6 +204,9 @@ def store(key, lat, lon):
         "rating": (static.get("rating") or {}).get("score"),
         "caveat": None,
     }
+    offers = [offer for offer in raw.get("discounts", [])
+              if offer["effects"].get("basket_discount") or offer["effects"].get("delivery_discount")]
+    record["offer_ids"] = [offer["id"] for offer in offers if not audience(offer)]
 
     priced = _checkout(record, [("0" * 24, 1, 1)], lat, lon)
     distance = next((re.search(r"\((.+)\)", row["label"]) for row in priced["checkout_rows"]
@@ -168,10 +219,13 @@ def store(key, lat, lon):
         "bag": priced["purchase_validation"].get("bag_fee") or 0,
     })
 
-    # Offers on the whole basket or on delivery are listed, not applied: several are for new customers only, and Wolt says so in words alone.
-    record["notes"] = [
-        "offer: " + " | ".join([offer["description"]["title"], *(offer["description"].get("points") or [])])[:150]
-        for offer in raw.get("discounts", [])
-        if offer["effects"].get("basket_discount") or offer["effects"].get("delivery_discount")
-    ]
+    # Wolt applies one offer on the goods at a time. Where a store runs several for every customer, this estimate counts them all and the pricing of the finished basket corrects it.
+    record["notes"] = []
+    for offer in offers:
+        title, limited = offer["description"]["title"], audience(offer)
+        segments = None if limited else offer_segments(offer, priced["telemetry"]["delivery_price"])
+        if segments:
+            record["fees"].append({"label": f"Offer: {title}", "segments": segments})
+        record["notes"].append(f"offer: {title}" + (f" ({limited}; not counted)" if limited else " (counted in the totals)" if segments
+                                                    else " (applied when Wolt prices the basket)"))
     return record

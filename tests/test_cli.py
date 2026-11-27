@@ -35,7 +35,7 @@ def store(platform, name, offers, delivery=250, minimum=2500, **extra):
 
 def sample_run():
     return {
-        "at": "2026-11-27T03:00+04:00", "food": False, "point": {"lat": 41.69, "lon": 44.8, "label": "home"}, "picks": {},
+        "at": "2026-11-27T03:00+04:00", "food": False, "point": {"lat": 41.69, "lon": 44.8, "label": "home"}, "picks": {}, "unread": {},
         "wants": {"milk": {"qty": 1, "queries": ["milk"]}, "eggs": {"qty": 1, "queries": ["eggs"]}, "rice": {"qty": 2, "queries": ["rice"]}},
         "stores": {
             "a1": store("alpha", "Alpha", {"milk": [offer("Chocolate milk 200ml", 300), offer("Milk 1L", 550)], "eggs": [offer("Eggs 10", 600)], "rice": []}),
@@ -112,6 +112,11 @@ class Cli(unittest.TestCase):
         self.assertIn("a1 rice: lookup failed, so unknown", self.solve())
         self.assertIn("?  lookup failed, so unknown", self.run_command(cli.show, ref="a1"))
 
+    def test_a_store_that_could_not_be_read_is_reported_with_every_report(self):
+        self.change(lambda run: run["unread"].update({"alpha:gamma": "URLError: no route"}))
+        for report in (self.solve(), self.run_command(cli.show, ref=None)):
+            self.assertIn("! alpha:gamma: the store could not be read (URLError: no route)", report)
+
     def test_threshold_hint_is_printed(self):
         self.assertIn("more goods here would cut the fees by", self.solve())
 
@@ -144,14 +149,18 @@ class Cli(unittest.TestCase):
         self.assertIn("(delivery price only)", report)
 
 
-def shop(shelves):
-    """A platform with fixed shelves: {store: {query: [(name, price), ...]}}."""
+def shop(shelves, broken=()):
+    """A platform with fixed shelves: {store: {query: [(name, price), ...]}}. A store named in `broken` fails its first read."""
+    broken = set(broken)
 
     def discover(query, lat, lon, food):
         return [{"store": key, "name": key.title(), "open": True, "price": price}
                 for key, shelf in shelves.items() for _, price in shelf.get(query, [])]
 
     def read(key, lat, lon):
+        if key in broken:
+            broken.remove(key)
+            raise OSError("no route")
         record = store("shop", key.title(), {})
         return {field: value for field, value in record.items() if field not in ("platform", "key", "offers", "failed")}
 
@@ -193,6 +202,16 @@ class Gather(unittest.TestCase):
         _, run = self.gather(add=True, store=["shop:full"])
         self.assertEqual(list(run["stores"]), ["s2", "s3"])
         self.assertEqual(run["stores"]["s2"]["offers"]["eggs"], [])
+
+    def test_a_store_whose_read_failed_is_remembered_and_read_on_the_next_add(self):
+        cli.PLATFORMS = {"shop": shop({"full": {"milk": [("Milk 1L", 550)]}}, broken=["full"])}
+        report, run = self.gather("milk")
+        self.assertEqual(run["stores"], {})
+        self.assertIn("! shop:full: the store could not be read (OSError: no route)", report)
+        report, run = self.gather(add=True)
+        self.assertEqual([s["key"] for s in run["stores"].values()], ["full"])
+        self.assertEqual(run["unread"], {})
+        self.assertNotIn("could not be read", report)
 
     def test_searching_a_want_afresh_replaces_its_candidates_and_forgets_its_pick(self):
         self.gather("milk", "eggs")

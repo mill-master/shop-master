@@ -79,7 +79,7 @@ def gather(args):
     if args.add:
         run = load(RUN_FILE, "run to add to")
     else:
-        run = {"food": args.food, "wants": {}, "stores": {}, "picks": {}}
+        run = {"food": args.food, "wants": {}, "stores": {}, "picks": {}, "unread": {}}
     run["at"] = datetime.now().astimezone().isoformat(timespec="minutes")
     run["point"] = point
     food = run["food"]
@@ -97,7 +97,7 @@ def gather(args):
     problems, also = [], []
     pool = ThreadPoolExecutor(6)
 
-    chosen = [tuple(spec.split(":", 1)) for spec in args.store]
+    chosen = [tuple(spec.split(":", 1)) for spec in [*args.store, *run["unread"]]]
     if not args.add:
         # Cross-store search shows which stores carry the most of the list; those are the ones worth reading closely.
         tasks = [(p, key, q) for p in platforms for key, want in run["wants"].items() for q in want["queries"]]
@@ -131,8 +131,9 @@ def gather(args):
     records = pool.map(lambda s: attempt(PLATFORMS[s[0]].store, s[1], lat, lon), fresh)
     for (platform, key), (record, error) in zip(fresh, records):
         if error:
-            problems.append(f"{platform}: reading store {key!r} failed ({error})")
+            run["unread"][f"{platform}:{key}"] = error
             continue
+        run["unread"].pop(f"{platform}:{key}", None)
         number = 1 + max((int(ref[1:]) for ref in run["stores"] if ref[0] == platform[0]), default=0)
         run["stores"][f"{platform[0]}{number}"] = {"platform": platform, "key": key, **record, "offers": {}, "failed": {}}
 
@@ -167,6 +168,7 @@ def gather(args):
         print(line)
     for problem in problems:
         print(f"! {problem}")
+    show_gaps(run)
 
 
 # --- show ------------------------------------------------------------------
@@ -244,8 +246,19 @@ def show_run(run, only=None):
                 print(f"    {' ' * width}     (dropped: no candidate stands for this want here)")
 
 
+def show_gaps(run):
+    """What the run could not establish. Each line is something unknown, not something absent."""
+    for spec, reason in run["unread"].items():
+        print(f"! {spec}: the store could not be read ({reason}). `gather --add` tries again.")
+    for ref, store in run["stores"].items():
+        for key, reason in store["failed"].items():
+            print(f"! {ref} {key}: lookup failed, so unknown ({reason}). `gather --add` tries again.")
+
+
 def show(args):
-    show_run(load(RUN_FILE, "run"), args.ref)
+    run = load(RUN_FILE, "run")
+    show_run(run, args.ref)
+    show_gaps(run)
 
 
 # --- pick ------------------------------------------------------------------
@@ -363,9 +376,7 @@ def solve(args):
     for key in run["wants"]:
         if not any(key in store["prices"] for store in stores):
             print(f"\n! {key}: no open store in the run offers it.")
-    for ref, store in run["stores"].items():
-        for key, reason in store["failed"].items():
-            print(f"! {ref} {key}: lookup failed, so unknown ({reason}). `gather --add` retries it.")
+    show_gaps(run)
     for note in skipped:
         print(f"! left out: {note} (use --closed to plan with it)")
 
@@ -381,13 +392,13 @@ def main():
     p.set_defaults(run=where)
 
     p = commands.add_parser("gather", help="collect stores, fee rules and candidate products for the list")
-    p.add_argument("--want", action="append", default=[], metavar="KEY[*QTY]=QUERY[|QUERY]", help="a wanted item and what to search for; repeat per item")
+    p.add_argument("--want", action="append", default=[], metavar="KEY[*QTY]=QUERY[|QUERY]", help="a wanted item and what to search for; QTY counts packs as sold, or kilograms for goods sold by weight; repeat per item")
     p.add_argument("--food", action="store_true", help="look at restaurants and their dishes instead of stores")
     p.add_argument("--store", action="append", default=[], metavar="PLATFORM:KEY", help="include this store whatever the search ranks")
     p.add_argument("--per-platform", type=int, default=3, help="stores taken from each platform's ranking (default 3)")
     p.add_argument("--platform", help="comma-separated platforms to use (default: all)")
     p.add_argument("--closed", action="store_true", help="also consider stores that are closed now")
-    p.add_argument("--add", action="store_true", help="extend the current run with more wants or stores, and retry failed lookups")
+    p.add_argument("--add", action="store_true", help="extend the current run with more wants or stores, and retry what failed")
     p.set_defaults(run=gather)
 
     p = commands.add_parser("show", help="print the current run")
