@@ -6,9 +6,11 @@ A run moves through four commands: `where` fixes the delivery point, `gather` co
 
 import argparse
 import json
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from math import floor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -16,17 +18,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import bolt  # noqa: E402
 import glovo  # noqa: E402
 import solver  # noqa: E402
+import units  # noqa: E402
 import wolt  # noqa: E402
 
 PLATFORMS = {"wolt": wolt, "glovo": glovo, "bolt": bolt}
 POINT_FILE = Path.home() / ".config" / "shop-master" / "point.json"
 RUN_FILE = Path.home() / ".cache" / "shop-master" / "run.json"
 SAMPLE_BASKETS = (1000, 2500, 5000, 10000)
+CANDIDATES = 8   # products kept per item and store
 ALSO_LISTED = 6  # stores named after the chosen ones, for adding by hand
+ROUNDS = 3       # times a closed or unreadable store is replaced by the next in the ranking
 
 
 def money(amount):
     return f"{amount / 100:.2f}"
+
+
+def now():
+    return datetime.now().astimezone().isoformat(timespec="minutes")
 
 
 def load(path, what):
@@ -48,7 +57,7 @@ def attempt(function, *args):
     try:
         return function(*args), None
     except Exception as error:  # every failure of a remote lookup is reported the same way
-        return None, f"{type(error).__name__}: {error}"
+        return None, str(error) if isinstance(error, RuntimeError) else f"{type(error).__name__}: {error}"
 
 
 # --- where -----------------------------------------------------------------
@@ -64,13 +73,68 @@ def where(args):
     print(f"Delivery point saved to {POINT_FILE}")
 
 
-# --- gather ----------------------------------------------------------------
+# --- the list --------------------------------------------------------------
 
 def parse_want(spec):
-    """'eggs*2=eggs|კვერცხი' -> ('eggs', 2, ['eggs', 'კვერცხი'])"""
+    """'eggs*2=eggs|კვერცხი' -> ('eggs', {'count': 2, 'queries': ['eggs', 'კვერცხი']}); 'milk*2l=milk' -> ('milk', {'amount': [2000, 'ml'], ...})"""
     left, _, queries = spec.partition("=")
-    key, _, quantity = left.partition("*")
-    return key.strip(), float(quantity) if quantity else 1, [q.strip() for q in (queries or key).split("|") if q.strip()]
+    key, _, quantity = (part.strip() for part in left.partition("*"))
+    if not re.fullmatch(r"[\w-]+", key):
+        sys.exit(f"{spec}: an item's key is one plain word, such as 'milk' or 'black-pepper'.")
+    want = {"queries": [query.strip() for query in (queries or key).split("|") if query.strip()]}
+    amount = units.measure(quantity)
+    if not quantity:
+        want["count"] = 1
+    elif quantity.isdigit() and int(quantity) > 0:
+        want["count"] = int(quantity)
+    elif amount and units.SIZE.fullmatch(quantity):
+        want["amount"] = amount
+    else:
+        sys.exit(f"{spec}: after * give a number of packs (eggs*2) or an amount with its unit (eggs*20pc, milk*2l, rice*1kg, cheese*300g).")
+    return key, want
+
+
+def show_size(size):
+    amount, unit = size
+    if unit != "pc" and amount >= 1000:
+        amount, unit = amount / 1000, {"g": "kg", "ml": "l"}[unit]
+    return f"{amount:g} {unit}"
+
+
+def standing(run, ref, key):
+    """The candidate standing for an item at a store and how many of it to buy, as (offer, count), or None when none stands.
+
+    Left to itself the platform's first match stands. Where the shopper asked for an amount, it is the first match whose pack size can be compared with that amount: a pack of unknown size could be anything from one egg to thirty.
+    """
+    offers = run["stores"][ref]["offers"].get(key)
+    if not offers:
+        return None
+    pick, want = run["picks"].get(f"{ref}.{key}"), run["wants"][key]
+    if pick is None:
+        if "amount" not in want:
+            return offers[0], want["count"]
+        return next(((offer, count) for offer in offers if (count := units.packs(want["amount"], offer.get("size")))), None)
+    if pick["n"] is None:
+        return None
+    offer = offers[pick["n"] - 1]
+    count = pick.get("count") or (units.packs(want["amount"], offer.get("size")) if "amount" in want else want["count"])
+    return (offer, count) if count else None
+
+
+def amounts(offer, count):
+    """What `count` units of a candidate cost, and what they would cost without discounts."""
+    paid = offer["price"] * count
+    if offer.get("bulk") and count >= offer["bulk"][0]:
+        paid -= floor(paid * offer["bulk"][1] + 0.5)
+    return paid, max(paid, offer.get("list", offer["price"]) * count)
+
+
+# --- gather ----------------------------------------------------------------
+
+def rank(seen, platform):
+    """One platform's stores by how much of the list they matched, the cheaper match first among equals."""
+    return sorted(((store, found) for (name, store), found in seen.items() if name == platform),
+                  key=lambda entry: (-len(entry[1]), sum(entry[1].values())))
 
 
 def gather(args):
@@ -78,87 +142,139 @@ def gather(args):
     lat, lon = point["lat"], point["lon"]
     if args.add:
         run = load(RUN_FILE, "run to add to")
+        if run["point"] != point:
+            sys.exit("The delivery point has changed since this run was gathered, and its stores carry the old point's fees. Gather afresh.")
+        run["extended"] = now()
     else:
-        run = {"food": args.food, "wants": {}, "stores": {}, "picks": {}, "unread": {}}
-    run["at"] = datetime.now().astimezone().isoformat(timespec="minutes")
-    run["point"] = point
+        run = {"at": now(), "point": point, "food": args.food, "wants": {}, "stores": {}, "picks": {}, "unread": {}, "issued": {}}
     food = run["food"]
+    fresh_wants = []
     for spec in args.want:
-        key, quantity, queries = parse_want(spec)
-        if run["wants"].get(key, {}).get("queries", queries) != queries:
-            # A want searched afresh loses what the old queries found, and the picks made among it.
+        key, want = parse_want(spec)
+        if run["wants"].get(key, {}).get("queries") != want["queries"]:
+            # An item searched afresh loses what the old queries found, and the picks made among it.
             for ref, store in run["stores"].items():
                 store["offers"].pop(key, None)
                 run["picks"].pop(f"{ref}.{key}", None)
-        run["wants"][key] = {"qty": quantity, "queries": queries}
+            fresh_wants.append(key)
+        run["wants"][key] = want
     if not run["wants"]:
         sys.exit("Nothing wanted: pass at least one --want.")
     platforms = args.platform.split(",") if args.platform else list(PLATFORMS)
+    named = [tuple(spec.split(":", 1)) for spec in [*args.store, *run["unread"]]]
+    for platform in [*platforms, *(spec[0] for spec in named)]:
+        if platform not in PLATFORMS:
+            sys.exit(f"{platform}: not a platform. Use one of {', '.join(PLATFORMS)}, and name a store as platform:key.")
+    if any(len(spec) != 2 for spec in named):
+        sys.exit("Name a store as platform:key, for example wolt:spar-amaghleba.")
     problems, also = [], []
     pool = ThreadPoolExecutor(6)
 
-    chosen = [tuple(spec.split(":", 1)) for spec in [*args.store, *run["unread"]]]
-    if not args.add:
-        # Cross-store search shows which stores carry the most of the list; those are the ones worth reading closely.
-        tasks = [(p, key, q) for p in platforms for key, want in run["wants"].items() for q in want["queries"]]
-        answers = pool.map(lambda t: attempt(PLATFORMS[t[0]].discover, t[2], lat, lon, food), tasks)
-        seen, names = {}, {}
-        for (platform, key, query), (hits, error) in zip(tasks, answers):
-            if error:
-                problems.append(f"{platform}: cross-store search for {query!r} failed ({error})")
-                continue
-            for hit in hits:
-                if not (hit["open"] or args.closed):
-                    continue
-                names[platform, hit["store"]] = hit["name"]
-                cheapest = seen.setdefault((platform, hit["store"]), {})
-                cheapest[key] = min(cheapest.get(key, hit["price"]), hit["price"])
-        for platform in platforms:
-            ranked = sorted(
-                (item for item in seen.items() if item[0][0] == platform),
-                key=lambda item: (-len(item[1]), sum(item[1].values())),
-            )
-            chosen += [store for store, _ in ranked[: args.per_platform]]
-            if not ranked:
-                problems.append(f"{platform}: no {'restaurant' if food else 'store'} open now matched any of the list")
-            others = [f"{platform}:{store[1]} {names[store]} ({len(found)}/{len(run['wants'])})"
-                      for store, found in ranked[args.per_platform: args.per_platform + ALSO_LISTED]]
-            if others:
-                also.append(f"{platform} also matched: " + "; ".join(others))
-
-    known = {(s["platform"], s["key"]) for s in run["stores"].values()}
-    fresh = [store for store in dict.fromkeys(chosen) if store not in known]
-    records = pool.map(lambda s: attempt(PLATFORMS[s[0]].store, s[1], lat, lon), fresh)
-    for (platform, key), (record, error) in zip(fresh, records):
+    def read(platform, key):
+        """Read one store into the run. Returns the record, or None when it could not be read (which the run remembers)."""
+        record, error = attempt(PLATFORMS[platform].store, key, lat, lon)
+        spec = f"{platform}:{key}"
         if error:
-            run["unread"][f"{platform}:{key}"] = error
-            continue
-        run["unread"].pop(f"{platform}:{key}", None)
-        number = 1 + max((int(ref[1:]) for ref in run["stores"] if ref[0] == platform[0]), default=0)
-        run["stores"][f"{platform[0]}{number}"] = {"platform": platform, "key": key, **record, "offers": {}, "failed": {}}
+            run["unread"][spec] = error
+            return None
+        run["unread"].pop(spec, None)
+        return record
 
-    def fill(pair):
+    def admit(platform, key, record):
+        run["issued"][platform] = run["issued"].get(platform, 0) + 1
+        run["stores"][f"{platform[0]}{run['issued'][platform]}"] = {"platform": platform, "key": key, **record, "offers": {}, "failed": {}}
+
+    held = {(store["platform"], store["key"]) for store in run["stores"].values()}
+    wanted = [spec for spec in dict.fromkeys(named) if spec not in held]
+    for (platform, key), record in zip(wanted, pool.map(lambda spec: read(*spec), wanted)):
+        if record:
+            admit(platform, key, record)
+            held.add((platform, key))
+
+    # Cross-store search shows which stores carry the most of the list; those are the ones worth reading closely.
+    searched = list(run["wants"]) if not args.add else fresh_wants
+    tasks = [(platform, key, query) for platform in platforms for key in searched for query in run["wants"][key]["queries"]]
+    seen, names = {}, {}
+    for (platform, key, query), (hits, error) in zip(tasks, pool.map(lambda task: attempt(PLATFORMS[task[0]].discover, task[2], lat, lon, food), tasks)):
+        if error:
+            problems.append(f"{platform}: cross-store search for {query!r} failed ({error})")
+            continue
+        for hit in hits:
+            if hit["open"] is False and not args.closed:
+                continue
+            names[platform, hit["store"]] = hit["name"]
+            cheapest = seen.setdefault((platform, hit["store"]), {})
+            cheapest[key] = min(cheapest.get(key, hit["price"]), hit["price"])
+
+    rankings = {platform: rank(seen, platform) for platform in platforms}
+    tried = set(held)
+
+    def fill(needs):
+        """Read stores until each need is met: None asks for the next store in a platform's ranking, an item's key for the next that matched it.
+
+        A store that turns out closed or unreadable leaves its need open, and the next round reads the one after it.
+        """
+        for _ in range(ROUNDS):
+            batch = []
+            for platform, need in needs:
+                store = next((store for store, found in rankings[platform]
+                              if (platform, store) not in tried and (need is None or need in found)), None)
+                if store:
+                    tried.add((platform, store))
+                    batch.append((platform, need, store))
+            if not batch:
+                break
+            for (platform, need, store), record in zip(batch, pool.map(lambda entry: read(entry[0], entry[2]), batch)):
+                if record and (record["open"] or args.closed):
+                    admit(platform, store, record)
+                    needs.remove((platform, need))
+                elif record:
+                    problems.append(f"{platform}: {record['name']} is closed ({record['opens']}) and was passed over; --closed keeps such stores")
+
+    if not args.add:
+        fill([(platform, None) for platform in platforms for _ in range(args.per_platform)])
+        for platform in platforms:
+            if not rankings[platform]:
+                problems.append(f"{platform}: no {'restaurant' if food else 'store'} matched any of the list")
+    # Whatever the stores read so far did not match gets a store of its own: a list of several kinds seldom fits the stores that match most of it.
+    uncovered = []
+    for platform in platforms:
+        matched = set().union(*(seen.get((platform, store["key"]), {}) for store in run["stores"].values() if store["platform"] == platform))
+        uncovered += [(platform, key) for key in searched if key not in matched and any(key in found for _, found in rankings[platform])]
+    fill(uncovered)
+    for platform in platforms:
+        others = [f"{platform}:{store} {names[platform, store]} ({len(found)}/{len(searched)})"
+                  for store, found in rankings[platform] if (platform, store) not in tried][:ALSO_LISTED]
+        if others:
+            also.append(f"{platform} also matched: " + "; ".join(others))
+
+    def stock(pair):
         ref, key = pair
         store = run["stores"][ref]
-        offers, errors = {}, []
+        found, errors = [], []
         for query in run["wants"][key]["queries"]:
-            found, error = attempt(PLATFORMS[store["platform"]].shelf, store, query, lat, lon)
+            offers, error = attempt(PLATFORMS[store["platform"]].shelf, store, query, lat, lon)
             if error:
                 errors.append(error)
-            for offer in found or []:
-                offers.setdefault(offer["id"], offer)
-        return list(offers.values()), errors
+            found.append(offers or [])
+        # The queries take turns, so that one with many matches does not crowd the others out of the few kept.
+        merged = {}
+        for position in range(max(map(len, found), default=0)):
+            for offers in found:
+                if position < len(offers):
+                    merged.setdefault(offers[position]["id"], offers[position])
+        return list(merged.values())[:CANDIDATES], errors
 
     pairs = [(ref, key) for ref, store in run["stores"].items() for key in run["wants"]
              if key not in store["offers"] or key in store["failed"]]
-    for (ref, key), (offers, errors) in zip(pairs, pool.map(fill, pairs)):
+    for (ref, key), (offers, errors) in zip(pairs, pool.map(stock, pairs)):
         store = run["stores"][ref]
+        if store["offers"].get(key) != offers:
+            run["picks"].pop(f"{ref}.{key}", None)  # a pick is a place in the list of candidates, which has changed
+        store["offers"][key] = offers
         store["failed"].pop(key, None)
-        if errors and not offers:
+        if errors:
             store["failed"][key] = errors[0]
-            store["offers"].pop(key, None)
-        else:
-            store["offers"][key] = offers
     pool.shutdown()
 
     save(RUN_FILE, run)
@@ -173,29 +289,23 @@ def gather(args):
 
 # --- show ------------------------------------------------------------------
 
-def current_pick(run, ref, key):
-    """(candidate number, quantity) standing for a want at a store, or None when it has none."""
-    offers = run["stores"][ref]["offers"].get(key)
-    if not offers:
-        return None
-    pick = run["picks"].get(f"{ref}.{key}", {"n": 1})
-    if pick["n"] is None:
-        return None
-    return pick["n"], pick.get("qty") or run["wants"][key]["qty"]
-
-
 def describe_offer(offer):
     parts = [offer["name"]]
-    if offer.get("unit"):
-        parts.append(f"[{offer['unit']}]")
-    price = money(offer["price"])
     if offer.get("weighed"):
-        price += f" per {offer['per'][1]}, weighed" if offer.get("per") else ", weighed"
-    elif offer.get("per"):
-        price += f" ({money(offer['per'][0])}/{offer['per'][1]})"
-    if offer.get("was") and offer["was"] > offer["price"]:
-        price += f", was {money(offer['was'])}"
+        parts.append(f"[by weight, {show_size(offer['size'])} a step]")
+    elif offer.get("size"):
+        parts.append(f"[{show_size(offer['size'])}]")
+    price = ("from " if offer.get("from") else "") + money(offer["price"])
+    each = units.per_unit(offer["price"], offer.get("size"))
+    if each and offer.get("size") != [1, "pc"]:
+        price += f" ({money(each[0])}/{each[1]})"
+    if offer.get("list", offer["price"]) > offer["price"]:
+        price += f", was {money(offer['list'])}"
+    if offer.get("bulk"):
+        price += f", {offer['bulk'][1]:.0%} off from {offer['bulk'][0]} units"
     parts.append(price)
+    if offer.get("from"):
+        parts.append("has choices that can add to the price")
     if offer.get("stock") is not None:
         parts.append(f"stock {offer['stock']}")
     return "  ".join(parts)
@@ -210,40 +320,51 @@ def describe_store(store):
     return " · ".join(parts)
 
 
+def describe_run(run):
+    when = f"gathered {run['at']}" + (f", extended {run['extended']}" if run.get("extended") else "")
+    return f"Run {when} for {run['point']['label'] or 'the saved point'}"
+
+
 def show_run(run, only=None):
-    print(f"Run gathered {run['at']} for {run['point']['label'] or 'the saved point'} ({'restaurants' if run['food'] else 'stores'})")
+    print(f"{describe_run(run)} ({'restaurants' if run['food'] else 'stores'})")
+    asked = [f"{key} ({show_size(want['amount'])})" if "amount" in want else f"{key} ×{want['count']}" if want["count"] != 1 else key
+             for key, want in run["wants"].items()]
+    print("List: " + ", ".join(asked))
     width = max(len(key) for key in run["wants"])
     for ref, store in run["stores"].items():
         if only and ref != only:
             continue
         print(f"\n{ref}  {describe_store(store)}")
         print(f"    {store['url']}")
-        samples = "  ".join(
-            f"{money(basket)}→{money(sum(amount for _, amount in solver.fee_lines(store, basket)))}" for basket in SAMPLE_BASKETS
-        )
+        samples = "  ".join(f"{money(basket)}→{money(solver.fee_total(store, basket))}" for basket in SAMPLE_BASKETS)
         print(f"    fees ({', '.join(fee['label'] for fee in store['fees'])}) by basket: {samples}")
         if store.get("caveat"):
             print(f"    caveat: {store['caveat']}")
         for note in store.get("notes", []):
             print(f"    {note}")
-        for key in run["wants"]:
+        for key, want in run["wants"].items():
             label = key.ljust(width)
-            if key in store["failed"]:
-                print(f"    {label}  ?  lookup failed, so unknown: {store['failed'][key]}")
-                continue
             offers = store["offers"].get(key, [])
             if not offers:
-                print(f"    {label}  -  nothing found")
+                print(f"    {label}  {'?  lookup failed, so unknown' if key in store['failed'] else '-  nothing found'}")
                 continue
-            pick = current_pick(run, ref, key)
+            chosen = standing(run, ref, key)
             for number, offer in enumerate(offers, 1):
-                mark = "*" if pick and pick[0] == number else " "
-                count = f" x{pick[1]:g}" if pick and pick[0] == number and pick[1] != 1 else ""
-                print(f"    {label if number == 1 else ' ' * width} {mark}{number}  {describe_offer(offer)}{count}")
+                stands = bool(chosen) and chosen[0] is offer
+                if stands:
+                    count = f"  → ×{chosen[1]}" if chosen[1] != 1 or "amount" in want else ""
+                elif "amount" in want:
+                    packs = units.packs(want["amount"], offer.get("size"))
+                    count = f"  → ×{packs}" if packs else "  → size unknown"
+                else:
+                    count = ""
+                print(f"    {label if number == 1 else ' ' * width} {'*' if stands else ' '}{number}  {describe_offer(offer)}{count}")
                 if run["food"] and offer.get("note"):
                     print(f"    {' ' * width}     {offer['note'][:220]}")
-            if not pick:
-                print(f"    {' ' * width}     (dropped: no candidate stands for this want here)")
+            if not chosen and f"{ref}.{key}" in run["picks"]:
+                print(f"    {' ' * width}     (dropped: no candidate stands for this item here)")
+            elif not chosen:
+                print(f"    {' ' * width}     (none stands: no pack size here compares with the amount asked; pick one with its number, as in {ref}.{key}=1x2)")
 
 
 def show_gaps(run):
@@ -252,7 +373,7 @@ def show_gaps(run):
         print(f"! {spec}: the store could not be read ({reason}). `gather --add` tries again.")
     for ref, store in run["stores"].items():
         for key, reason in store["failed"].items():
-            print(f"! {ref} {key}: lookup failed, so unknown ({reason}). `gather --add` tries again.")
+            print(f"! {ref} {key}: a lookup failed, so the candidates may be incomplete ({reason}). `gather --add` tries again.")
 
 
 def show(args):
@@ -274,10 +395,15 @@ def pick(args):
         if choice == "-":
             run["picks"][target] = {"n": None}
             continue
-        number, _, quantity = choice.partition("x")
+        number, _, count = choice.partition("x")
         if not number.isdigit() or not 1 <= int(number) <= len(offers):
             sys.exit(f"{spec}: candidate numbers at {target} run from 1 to {len(offers)}.")
-        run["picks"][target] = {"n": int(number), **({"qty": float(quantity)} if quantity else {})}
+        if count and not (count.isdigit() and int(count) > 0):
+            sys.exit(f"{spec}: after x give how many to buy, a whole number of at least 1.")
+        want = run["wants"][key]
+        if not count and "amount" in want and not units.packs(want["amount"], offers[int(number) - 1].get("size")):
+            sys.exit(f"{spec}: that candidate's pack size is unknown, so say how many to buy, as in {target}={number}x2.")
+        run["picks"][target] = {"n": int(number), **({"count": int(count)} if count else {})}
     save(RUN_FILE, run)
     print(f"{len(args.picks)} pick(s) saved.")
 
@@ -307,12 +433,16 @@ def price_exactly(run, plan, lines, quotes):
         if key not in quotes:
             quotes[key] = attempt(module.quote, store, [lines[basket["ref"], want] for want in basket["wants"]],
                                   run["point"]["lat"], run["point"]["lon"])
-        fees, error = quotes[key]
+        priced, error = quotes[key]
         if error:
             basket["quote_error"] = error
             continue
-        basket["fees"], basket["basis"] = fees, "priced"
-        basket["total"] = basket["subtotal"] + sum(amount for _, amount in fees)
+        basket["fees"], basket["basis"] = list(priced["fees"]), "priced"
+        if priced["goods"] not in (None, basket["subtotal"]):
+            # The platform charges the goods differently from the shelf prices added up: offers that depend on what else is in the basket.
+            label = "Offers: " + "; ".join(priced["offers"]) if priced["offers"] else "Goods as priced by the platform"
+            basket["fees"].insert(0, (label, priced["goods"] - basket["subtotal"]))
+        basket["total"] = basket["subtotal"] + sum(amount for _, amount in basket["fees"])
     plan["total"] = sum(basket["total"] for basket in plan["baskets"])
 
 
@@ -323,46 +453,52 @@ def solve(args):
         if not store["open"] and not args.closed:
             skipped.append(f"{ref} {store['name']} is closed")
             continue
-        prices = {}
+        amounts_here = {}
         for key in run["wants"]:
-            choice = current_pick(run, ref, key)
-            if choice:
-                offer = store["offers"][key][choice[0] - 1]
-                prices[key] = round(offer["price"] * choice[1])
-                lines[ref, key] = (offer, choice[1])
-        if prices:
-            stores.append({"ref": ref, "fees": store["fees"], "prices": prices})
+            chosen = standing(run, ref, key)
+            if chosen:
+                lines[ref, key] = chosen
+                amounts_here[key] = amounts(chosen[0], chosen[1])
+        if amounts_here:
+            stores.append({"ref": ref, "fees": store["fees"], "lines": amounts_here})
 
     ranked = solver.plans(list(run["wants"]), stores, args.max_stores)
     if not ranked:
         sys.exit("No open store in the run has any of the wanted items.")
     listed = ranked[: args.top]
-    single = next((plan for plan in ranked if len(plan["baskets"]) == 1), None)
-    if single and single not in listed:
-        listed.append(single)
+    extras = {
+        "Best single order": next((plan for plan in ranked if len(plan["baskets"]) == 1), None),
+        # A store whose fees are partly hidden looks cheaper than it is, so the best plan free of such stores is always shown beside the rest.
+        "Best with every fee known": next((plan for plan in ranked
+                                           if not any(run["stores"][basket["ref"]].get("partial") for basket in plan["baskets"])), None),
+    }
+    for plan in extras.values():
+        if plan and plan not in listed:
+            listed.append(plan)
     quotes = {}
     for plan in listed:
         price_exactly(run, plan, lines, quotes)
     listed.sort(key=lambda plan: (len(plan["missing"]), plan["total"]))
 
     currency = next((store["currency"] for store in run["stores"].values() if store.get("currency")), "")
-    print(f"Run gathered {run['at']} for {run['point']['label'] or 'the saved point'}; amounts in {currency}")
+    print(f"{describe_run(run)}; amounts in {currency}")
     for position, plan in enumerate(listed, 1):
         orders = len(plan["baskets"])
         bases = {basket["basis"] for basket in plan["baskets"]}
         total = money(plan["total"])
         total = f"at least {total}" if "partial" in bases else f"about {total}" if bases - {"priced"} else total
         covered = "everything covered" if not plan["missing"] else "WITHOUT " + ", ".join(plan["missing"])
-        note = "  (approximate: list too long for an exact search)" if plan["approximate"] else ""
+        tags = [name.lower() for name, extra in extras.items() if extra is plan]
+        note = (f"  [{'; '.join(tags)}]" if tags else "") + ("  (approximate: the search was cut short)" if plan["approximate"] else "")
         print(f"\n{position}. {total} in {orders} order{'s' if orders > 1 else ''}, {covered}{note}")
         for basket in plan["baskets"]:
             store = run["stores"][basket["ref"]]
             print(f"   {basket['ref']}  {describe_store(store)}")
             print(f"      {store['url']}")
             for key in basket["wants"]:
-                offer, quantity = lines[basket["ref"], key]
-                unit = f" [{offer['unit']}]" if offer.get("unit") else ""
-                print(f"      {key}: {quantity:g} × {offer['name']}{unit}  {money(round(offer['price'] * quantity))}")
+                offer, count = lines[basket["ref"], key]
+                size = f" [{show_size(offer['size'])}]" if offer.get("size") else ""
+                print(f"      {key}: {count} × {offer['name']}{size}  {money(amounts(offer, count)[0])}")
             fees = "".join(f" + {label} {money(amount)}" if amount >= 0 else f" − {label} {money(-amount)}" for label, amount in basket["fees"])
             basis = {"priced": f"priced by {store['platform'].title()}", "planned": "planning estimate",
                      "estimated": store.get("caveat"), "partial": store.get("caveat")}[basket["basis"]]
@@ -374,7 +510,7 @@ def solve(args):
                 print(f"      {money(extra)} more goods here would cut the fees by {money(saved)}")
 
     for key in run["wants"]:
-        if not any(key in store["prices"] for store in stores):
+        if not any(key in store["lines"] for store in stores):
             print(f"\n! {key}: no open store in the run offers it.")
     show_gaps(run)
     for note in skipped:
@@ -392,21 +528,22 @@ def main():
     p.set_defaults(run=where)
 
     p = commands.add_parser("gather", help="collect stores, fee rules and candidate products for the list")
-    p.add_argument("--want", action="append", default=[], metavar="KEY[*QTY]=QUERY[|QUERY]", help="a wanted item and what to search for; QTY counts packs as sold, or kilograms for goods sold by weight; repeat per item")
+    p.add_argument("--want", action="append", default=[], metavar="KEY[*HOW-MUCH]=QUERY[|QUERY]",
+                   help="an item and what to search for; HOW-MUCH is a number of packs (eggs*2) or an amount with its unit (eggs*20pc, milk*2l, rice*1kg), from which the packs are counted; repeat per item")
     p.add_argument("--food", action="store_true", help="look at restaurants and their dishes instead of stores")
     p.add_argument("--store", action="append", default=[], metavar="PLATFORM:KEY", help="include this store whatever the search ranks")
-    p.add_argument("--per-platform", type=int, default=3, help="stores taken from each platform's ranking (default 3)")
+    p.add_argument("--per-platform", type=int, default=3, help="stores taken from each platform's ranking (default 3); a store is added for any item those do not match")
     p.add_argument("--platform", help="comma-separated platforms to use (default: all)")
-    p.add_argument("--closed", action="store_true", help="also consider stores that are closed now")
-    p.add_argument("--add", action="store_true", help="extend the current run with more wants or stores, and retry what failed")
+    p.add_argument("--closed", action="store_true", help="also take stores that are closed now")
+    p.add_argument("--add", action="store_true", help="extend the current run with more items or stores, and retry what failed")
     p.set_defaults(run=gather)
 
     p = commands.add_parser("show", help="print the current run")
     p.add_argument("ref", nargs="?", help="only this store")
     p.set_defaults(run=show)
 
-    p = commands.add_parser("pick", help="choose which candidate stands for a want at a store")
-    p.add_argument("picks", nargs="+", metavar="REF.WANT=N[xQTY]|-", help="e.g. w1.milk=2  g1.eggs=1x2  b1.rice=-  (- means none fits)")
+    p = commands.add_parser("pick", help="choose which candidate stands for an item at a store")
+    p.add_argument("picks", nargs="+", metavar="REF.ITEM=N[xCOUNT]|-", help="e.g. w1.milk=2  g1.eggs=1x2 (candidate 1, two of it)  b1.rice=- (none fits)")
     p.set_defaults(run=pick)
 
     p = commands.add_parser("drop", help="remove stores from the run")

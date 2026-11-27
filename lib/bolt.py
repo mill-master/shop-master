@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 from uuid import uuid4
 
 from net import fetch
+from units import measure, money
 
 API = "https://deliveryuser.live.boltsvc.net/deliveryClient/public"
 CLIENT = urlencode({
@@ -59,13 +60,16 @@ def shelf(store, query, lat, lon, limit=8):
     dishes.sort(key=lambda dish: -(dish.get("score") or 0))
     offers = []
     for dish in dishes[:limit]:
-        by_weight = dish.get("selling_unit") == "kg"
+        name, price = dish["name"]["value"].strip(), _minor(dish["price"]["value"])
+        # Bolt prices the pack as named and, for goods it reckons by weight, adds the price per kilogram ("67,00 ₾/kg"); the two give the pack's weight.
+        per_kilo = ((dish.get("unit_price") or {}).get("unit_price") or {}).get("value") or ""
         offers.append({
             "id": str(dish["id"]),
-            "name": dish["name"]["value"].strip(),
-            "price": _minor(dish["price"]["value"]),
-            "per": [_minor(dish["price"]["value"]), "kg"] if by_weight else None,
-            "weighed": by_weight,
+            "name": name,
+            "price": price,
+            "list": price,
+            "size": [round(price / money(per_kilo) * 1000), "g"] if per_kilo.endswith("/kg") and money(per_kilo) else measure(name),
+            "from": dish.get("option_group_presence") not in (None, "none"),
             "stock": dish.get("available_quantity"),
             "note": ((dish.get("description") or {}).get("value") or "").strip() or None,
         })

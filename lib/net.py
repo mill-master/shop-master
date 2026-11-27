@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 # Seconds between two requests to one host. The platforms throttle bursts, and a gather sends dozens of requests; at 0.2 Glovo answered some with 429.
 GAP = 0.35
 RETRY_ON = (429, 502, 503, 504)
+ATTEMPTS = 4
 
 _next_slot = {}
 _lock = threading.Lock()
@@ -24,8 +25,17 @@ def _wait_turn(host):
     time.sleep(slot - now)
 
 
+def _hold(host, seconds):
+    """Keep every thread off `host` for a while: a throttled host is throttling all of them."""
+    with _lock:
+        _next_slot[host] = max(_next_slot.get(host, 0.0), time.monotonic() + seconds)
+
+
 def fetch(url, headers=None, body=None, timeout=40):
-    """GET `url`, or POST `body` as JSON when one is given. Returns the decoded JSON reply."""
+    """GET `url`, or POST `body` as JSON when one is given. Returns the decoded JSON reply.
+
+    A failure is raised as RuntimeError naming the host and path, with the cause chained.
+    """
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(url, data=data)
     request.add_header("accept", "application/json")
@@ -35,8 +45,9 @@ def fetch(url, headers=None, body=None, timeout=40):
     for name, value in (headers or {}).items():
         request.add_header(name, value)
 
-    host = urlsplit(url).netloc
-    for attempt in range(4):
+    target = urlsplit(url)
+    host, call = target.netloc, f"{target.netloc}{target.path}"
+    for attempt in range(ATTEMPTS):
         _wait_turn(host)
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -45,12 +56,13 @@ def fetch(url, headers=None, body=None, timeout=40):
                     raw = gzip.decompress(raw)
                 return json.loads(raw)
         except urllib.error.HTTPError as error:
-            if error.code not in RETRY_ON or attempt == 3:
-                raise
+            if error.code not in RETRY_ON or attempt == ATTEMPTS - 1:
+                raise RuntimeError(f"{call} answered {error.code}") from error
             asked = error.headers.get("retry-after", "")
-            time.sleep(float(asked) if asked.isdigit() else 2.0 * 2 ** attempt)
-        except OSError:
+            # A throttled host stays shut for tens of seconds; shorter waits only spend the remaining attempts.
+            _hold(host, float(asked) if asked.isdigit() else 4.0 * 3 ** attempt)
+        except OSError as error:
             # No reply at all: a failed name lookup, a dropped connection, a timeout.
-            if attempt == 3:
-                raise
-            time.sleep(2.0 * 2 ** attempt)
+            if attempt == ATTEMPTS - 1:
+                raise RuntimeError(f"{call} could not be reached ({getattr(error, 'reason', error)})") from error
+            _hold(host, 2.0 * 2 ** attempt)

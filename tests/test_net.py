@@ -26,6 +26,7 @@ class Fetch(unittest.TestCase):
     def fetch(self, *outcomes):
         """Call fetch with urlopen yielding `outcomes` in turn; returns (result or raised error, attempts, sleeps)."""
         queue, sleeps = list(outcomes), []
+        net._next_slot.clear()  # each case starts with every host free
 
         def urlopen(request, timeout):
             outcome = queue.pop(0)
@@ -45,18 +46,19 @@ class Fetch(unittest.TestCase):
         result, attempts, _ = self.fetch(urllib.error.URLError("name lookup failed"), ConnectionResetError(), {"ok": 1})
         self.assertEqual((result, attempts), ({"ok": 1}, 3))
 
-    def test_it_gives_up_after_four_attempts(self):
+    def test_it_gives_up_after_four_attempts_and_names_the_call(self):
         result, attempts, _ = self.fetch(*[urllib.error.URLError("down")] * 5)
-        self.assertIsInstance(result, urllib.error.URLError)
+        self.assertEqual(str(result), "example.test/ could not be reached (down)")
+        self.assertIsInstance(result.__cause__, urllib.error.URLError)
         self.assertEqual(attempts, 4)
 
-    def test_a_throttled_request_waits_as_long_as_the_server_asks(self):
+    def test_a_throttled_host_is_left_alone_as_long_as_it_asks(self):
         result, attempts, sleeps = self.fetch(http_error(429, {"retry-after": "7"}), {"ok": 1})
-        self.assertEqual((result, attempts, sleeps), ({"ok": 1}, 2, [7.0]))
+        self.assertEqual((result, attempts, [round(pause) for pause in sleeps]), ({"ok": 1}, 2, [7]))
 
     def test_a_refusal_is_not_retried(self):
         result, attempts, _ = self.fetch(http_error(403), {"ok": 1})
-        self.assertEqual((result.code, attempts), (403, 1))
+        self.assertEqual((str(result), result.__cause__.code, attempts), ("example.test/ answered 403", 403, 1))
 
 
 if __name__ == "__main__":

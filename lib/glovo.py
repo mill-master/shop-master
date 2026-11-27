@@ -9,6 +9,7 @@ from urllib.parse import quote as urlquote
 from uuid import uuid4
 
 from net import fetch
+from units import measure, money
 
 API = "https://api.glovoapp.com"
 
@@ -92,6 +93,8 @@ def discover(query, lat, lon, food):
     for element in reply["data"]["body"]["data"]["elements"]:
         if element["type"] == "STORE_CARD_V2":
             state = _find(element, "shopIsOpen")  # the card's display event carries the store's state
+            if not state:
+                raise RuntimeError(f"Glovo's search card for {element['data'].get('slug')} came without the store's state")
             title = ((element["data"].get("title") or {}).get("text") or {}).get("text")
             card = {"store": element["data"]["slug"], "name": title or element["data"]["slug"], "open": state["shopIsOpen"] == "true"}
             if (state["glovoCategoryId"] == FOOD_CATEGORY) != food:
@@ -100,8 +103,7 @@ def discover(query, lat, lon, food):
             for product in element["data"]["elements"]:
                 shown = (product["data"].get("pricing") or {}).get("finalPrice")
                 if shown:
-                    # A display string such as "4,49 ₾".
-                    hits.append({**card, "price": _minor(float(re.sub(r"[^\d,]", "", shown).replace(",", ".")))})
+                    hits.append({**card, "price": money(shown)})
             card = None
     return hits
 
@@ -116,11 +118,15 @@ def shelf(store, query, lat, lon, limit=8):
                 "id": str(product["id"]),
                 "name": product["name"].strip(),
                 "price": _minor(product["price"]),
+                "list": _minor(product["price"]),
+                # Glovo gives no size apart from the name, and does not mark goods sold by weight.
+                "size": measure(product["name"]),
+                "from": bool(product.get("attributeGroups")),
                 "note": (product.get("description") or "").strip() or None,
             }
             promotion = product.get("promotion") or {}
             if promotion.get("price") and not promotion.get("isPrime"):
-                offer["was"], offer["price"] = offer["price"], _minor(promotion["price"])
+                offer["price"] = _minor(promotion["price"])
             elif promotion:
                 extra = f"offer: {promotion.get('title')}" + (" (Prime members)" if promotion.get("isPrime") else "")
                 offer["note"] = f"{extra}. {offer['note']}" if offer["note"] else extra
@@ -138,7 +144,8 @@ def schedule(delivery, service, surcharges):
     fees = [{"label": "Delivery", "segments": [[0, None, _minor(delivery), 0]]}]
     if service:
         rate, low, high = service["setupValue"] / 100, service["minValue"], service["maxValue"]
-        fees.append({"label": "Service fee", "segments": [[0, low / rate, low, 0], [low / rate, high / rate, 0, rate], [high / rate, None, high, 0]]})
+        segments = [[0, low / rate, low, 0], [low / rate, high / rate, 0, rate], [high / rate, None, high, 0]] if rate else [[0, None, low, 0]]
+        fees.append({"label": "Service fee", "segments": segments})
     segments = []
     for band in surcharges:
         low, high, amount = _minor(band["lowerBound"]), _minor(band["upperBound"]), _minor(band["surchargeInfo"]["amount"])
