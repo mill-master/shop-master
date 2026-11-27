@@ -66,11 +66,13 @@ A platform that does not deliver to your address is left out of the comparison, 
 
 ## Signing in
 
-No account is needed for anything above. Signing in is optional and buys one thing: the Wolt baskets in Claude's answer are priced as your account pays, Wolt+ and personal offers included. On Glovo and Bolt Food it only reads whether you hold a subscription.
+No account is needed for anything above. Signing in is optional and buys one thing: the Wolt baskets in Claude's answer are priced as your account pays, Wolt+ and personal offers included. On Glovo it only reads whether you hold a subscription. Bolt Food is read signed out only, because its fraud protection refuses a sign-in from this tool.
 
-Two things to weigh first. No real account has signed in through this tool yet, so you would be the first. And a platform may restrict an account used this way, as the next section explains.
+Before each request Claude asks whether to run it signed in or signed out, and says what each changes. A signed-out run asks nothing in your name, and its totals leave a membership's discount out. No cart is filled in either.
 
-To sign in or out, ask Claude, which gives you a command to run in your own terminal. Signing in asks there for your phone number and the code texted to it, or for your Glovo e-mail address and password. An account that signs in some other way, with Google or Apple, or by phone on Glovo, signs in through a browser window at the platform's own page instead, which needs Google Chrome or Chromium. What is kept is a token in a file on your computer that only you can read, and signing out deletes it.
+Two things to weigh first. Signing in has been tried on one real account, and worked on Wolt and on Glovo through a browser window. Pricing a basket for that account has not been tried yet. And a platform may restrict an account used this way, as the next section explains.
+
+To sign in or out, ask Claude, which gives you a command to run in your own terminal. It opens a browser window at the platform's own sign-in page, where you sign in as usual and then close the browser; this needs Google Chrome or Chromium. What is kept is a token in a file on your computer that only you can read, and signing out deletes it.
 
 ## The platforms' terms
 

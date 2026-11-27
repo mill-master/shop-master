@@ -17,10 +17,12 @@ The cheapest shelf price therefore says little. What the shopper needs is the st
 
 Fees and store choice depend on where the order is going, so a delivery point comes first: a pair of coordinates saved with `shopmaster where LAT LON label`, and shown by `where` alone. When none is saved, or the order is going somewhere else, ask for it. A home address is personal: take coordinates from the shopper, or use those of a landmark they name, in preference to sending their address to a geocoding service.
 
-A run starts with `gather`, which takes one `--want` for each item:
+Before every request the shopper chooses how it is run: signed in, which uses the accounts they have signed in to, or signed out. The tool gathers nothing until that choice is made. Run `gather` first without either choice: it asks no platform anything, prints which platforms are signed in, how each was signed in, and what each way changes, and stops. Put that choice to the shopper in your own words, with what a signed-out run cannot do, and run `gather` again with their answer. Ask for each new request, also when they answered before, and leave the choice to them: it is their account. A request that itself says how to run it has made the choice. `gather --add` continues a run the way it was chosen.
+
+A run starts with `gather`, which takes the shopper's choice and one `--want` for each item:
 
 ```
-shopmaster gather --want 'milk*2l=milk 1l' --want 'eggs*20pc=eggs|კვერცხი' --want 'bread=bread'
+shopmaster gather --signed-out --want 'milk*2l=milk 1l' --want 'eggs*20pc=eggs|კვერცხი' --want 'bread=bread'
 ```
 
 An item is `key=query`, with `|` between alternative queries. The key is a plain word of your choosing, by which the item is named from then on. After `*` comes how much: an amount with its unit (`20pc`, `2l`, `1kg`, `300g`), from which the tool counts the packs at each store, or a bare number of packs, and with nothing one pack. `--food` turns the run to restaurants and dishes.
@@ -74,7 +76,7 @@ The tool cannot tell what a product is. Everything below is yours.
 `solve` prints the plans, cheapest first among those that cover the most:
 
 ```
-Run gathered 2026-11-27T18:09+04:00 for Freedom Square; amounts in GEL
+Run gathered 2026-11-27T18:09+04:00 for Freedom Square, signed out; amounts in GEL
 
 1. 23.10 in 1 order, everything covered  [best single order; best with every fee known]
    w2  Wolt · Goodwill Galleria Tbilisi · open · 35-45 min · 130 m · rating 9.6
@@ -123,18 +125,19 @@ A closed store is passed over for the next in the ranking, and left out of `solv
 
 ## The shopper's own account
 
-Everything above works signed out, and that is how the tool runs unless the shopper decides to sign in. As of November 2026 the sign-in routes below are read from the platforms' web clients and no real account has signed in through them, so offer signing in as untried. A signed-in account is used for two things only. Each Wolt basket in the plans `solve` lists is priced as that account pays, Wolt+ and personal offers included, and its line then ends "priced by Wolt for your account". And `shopmaster account` reports who is signed in on each platform and whether a subscription shows there. Glovo and Bolt totals stay as described above. Searches, shelves and stores are read signed out whether or not an account is signed in, and no cart is filled on any platform.
+Everything above works signed out. A run uses an account only when the shopper chose a signed-in run for that request, and then for one thing: each Wolt basket in the plans `solve` lists is priced as their account pays, Wolt+ and personal offers included, and its line ends "priced by Wolt for your account". Glovo and Bolt totals stay as described above in either kind of run. Searches, shelves and stores are read signed out in both, and no cart is filled on any platform, which the shopper should hear when they expect one to be. Apart from runs, `shopmaster account` reports who is signed in and whether a subscription shows there, and it asks the platforms in the shopper's name, so run it when they ask for it.
 
 Before a shopper signs in, tell them that the platforms' terms forbid automated use and that an account used with this tool can be restricted; the platform notes named at the end of this file quote the clauses. For the same reason the tool asks little of an account: its requests are spaced seconds apart, none is repeated, and an hourly limit stops them. When a platform answers one with 429, which is throttling, the account is left alone for an hour, and when it answers 401 or 403, a refusal, until the shopper signs in again. Baskets are priced as a visitor's meanwhile, and the basket line says so.
 
 Signing in takes a password or a code, which should not pass through this conversation, so the shopper runs the command in a terminal of their own. That terminal knows neither `shopmaster` nor any variable of yours: give them the whole line you would run yourself, with the folder's real path written out in it, ending in one of these.
 
-- `login wolt` asks for their phone number and then the code Wolt texts. At an empty answer it takes instead the link from a sign-in e-mail they request at wolt.com. Wolt sometimes wants a captcha before it texts, and the tool then says so.
-- `login glovo` asks for e-mail and password.
-- `login bolt` asks for their phone number and then the code Bolt texts.
-- `login wolt --browser` and `login glovo --browser` are for an account those cannot sign in: a Glovo account opened with a phone number, Google or Apple, or a Wolt account when the captcha is wanted. A plain browser window opens at the platform's sign-in page, the shopper signs in as usual and closes the browser, and the tool then reads the session out with the browser run headless, so no window opens again. This needs Google Chrome or Chromium and a desktop. Bolt has no such route.
+- `login wolt --browser` or `login glovo --browser` opens a plain browser window at the platform's sign-in page. The shopper signs in there as usual and closes the browser, and the tool then reads the session out with the browser run headless, so no window opens again. This needs Google Chrome or Chromium and a desktop. It is the way that has worked: on 2026-11-27 one real account signed in to Wolt and to Glovo through it.
+- `login wolt` asks for their phone number and then the code Wolt texts, or at an empty answer takes the link from a sign-in e-mail they request at wolt.com. On the one real try Wolt wanted a captcha before texting, at which the tool stops and names the browser window.
+- `login glovo` asks for e-mail and password. An account opened with a phone number, Google or Apple has only the browser window.
 
-The token stays in a file only they can read, and `logout PLATFORM` removes it. When a sign-in stops, pass the shopper the tool's message unaltered, since it says what to do next.
+Bolt Food is read signed out only. Its fraud protection refused the one sign-in tried with a real account, and the tool neither tries again nor looks for a way past it. When Bolt Plus could change the answer, ask the shopper whether they hold it.
+
+The token stays in a file only they can read, and `logout PLATFORM` removes it. When a sign-in stops, pass the shopper the tool's message unaltered, since it says what to do next. As of 2026-11-27 no basket has yet been priced for a real account, so read the first signed-in totals with care and say so.
 
 ## Dishes
 
@@ -142,7 +145,7 @@ With `--food` the candidates are dishes, each with the restaurant's description 
 
 ## What to tell the shopper
 
-Lead with the recommendation: the store or stores, what goes in each basket, the total with its fees, and the links. Give product names so they can be found in the app, with a translation where the catalogue is not in the shopper's language. Add the runner-up when it is close or trades money for speed or certainty. Say what you substituted or assumed, and what is uncertain in the total. Amounts are in the currency named on the first line of `solve`.
+Lead with the recommendation: the store or stores, what goes in each basket, the total with its fees, and the links. Say whether the run was made signed in or signed out, which the first line of each report states. Give product names so they can be found in the app, with a translation where the catalogue is not in the shopper's language. Add the runner-up when it is close or trades money for speed or certainty. Say what you substituted or assumed, and what is uncertain in the total. Amounts are in the currency named on the first line of `solve`.
 
 Prices, stock and opening state are as of the run's time, printed at the top of every report. Gather again for a decision made later. Prices in the apps can differ from the same shop's shelf prices, and goods sold by weight are charged by the weight actually packed.
 

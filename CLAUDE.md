@@ -16,4 +16,6 @@ The tool keeps its state under the user's home: the delivery point and the sign-
 
 The pacing record is shared by every run under one home: live checks from several shells take turns at one request a second per host, and a host is refused once it has been asked as often in an hour as the tool allows, in a message that names the figure. A scratch `HOME` starts a record of its own, so live checks spread over several scratch homes add up unseen: a day of them drew `429` from Glovo for requests a second apart. Count them as one load.
 
+A run made signed in asks the platforms in the owner's name. With the owner's sign-ins kept on the machine, make test runs signed out, and make a signed-in one only on the owner's word for that run.
+
 A platform's fee rules are established by pricing baskets, not by reading the parameters it publishes: Wolt's published service-fee bands describe a charge its checkout does not make. The measurements behind the present rules are in `tests/test_fees.py` and `skills/shop-master/platforms.md`.

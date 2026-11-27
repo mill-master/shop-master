@@ -163,16 +163,17 @@ As the platforms describe them on their own pages; none of it is computed.
 
 ## Signed-in access
 
-Nothing in this section had been confirmed with a real account as of 2026-11-27. The calls are read from the code of each platform's own web site, and where one was also tried signed out, its answer is given. Three open-source Wolt clients were read as well: the unofficial servers `erlaufer/wolt-mcp` and `mekedron/wolt-mcp`, and `mekedron/wolt-cli`, on which the second is built.
+The calls in this section are read from the code of each platform's own web site, and where one was also tried signed out, its answer is given. On 2026-11-27 one real account tried the routes, and what that showed is marked "seen with a real account"; the rest is unconfirmed. Three open-source Wolt clients were read as well: the unofficial servers `erlaufer/wolt-mcp` and `mekedron/wolt-mcp`, and `mekedron/wolt-cli`, on which the second is built.
 
-With an account the tool prices a basket on Wolt and reads the subscription on all three platforms. It fills no cart. The basket and checkout calls noted below are what was learned towards that.
+With an account, and in a run the shopper chose to make signed in, the tool prices a basket on Wolt; on Wolt and Glovo it reads who is signed in and whether a subscription shows. It fills no cart. The basket and checkout calls noted below are what was learned towards that. No basket has yet been priced for a real account.
 
 ### Wolt
 
 - **By e-mailed link.** Asking for the link (`POST authentication.wolt.com/v3/users/email_login`) carries an invisible hCaptcha, so the shopper asks for it at wolt.com. The link's `token` is redeemed by a form post, `POST /v1/wauth2/access_token` with `grant_type=email_login`, `audience=wolt-com` and `capabilities=access_confirmation`. A made-up token answered `401` with `error_code` 126. An `error_code` of 130 asks for a code sent by e-mail: `/v1/access_confirmation/email`, then `/email/submit`, then the token call again with `grant_type=access_confirmation_token`.
 - **By phone**, which Wolt's web dialog does not offer and its service answers. `POST /v1/captcha/site_key` with `{phone_number, operation: "start_phone_number_authentication_consumer"}` returns an `operation_token`, and a `site_key` that is null when no captcha is wanted. `POST /v2/wauth2/consumer-sms/start-phone-number-authentication` with `{phone_number, message_delivery_method: "sms", operation_token}` sends the code, and the token call redeems it with `grant_type=phone_number_otp`, `phone_number`, `otp` and `tenant=wolt`. When a `site_key` comes back the tool stops, since it solves no captcha.
+- **Seen with a real account:** the phone route was answered with a `site_key`, a captcha demand, so the tool stopped. Through a browser window the session was taken from the two cookies named below, and `GET restaurant-api.wolt.com/v1/user/me` and the subscriptions call both answered it.
 - **Renewal** is the token call with `grant_type=refresh_token`. It may hand back a new refresh token, which replaces the old.
-- **Signed-in calls** carry `authorization: Bearer`. `GET consumer-api.wolt.com/subscriptions-api/v1/subscriptions` lists Wolt+ plans, active while `paid_until_date` lies ahead.
+- **Signed-in calls** carry `authorization: Bearer`. `GET consumer-api.wolt.com/subscriptions-api/v1/subscriptions` lists the account's subscriptions, lapsed ones included, each with `plan.name` and with `start_date`, `next_payment_date` and `paid_until_date` as moments in seconds (`end_date` was null on a running one). One is held while `paid_until_date` lies ahead.
 - **Basket**, per the three clients: written with `POST /order-xp/v1/baskets`, a whole replace for that store in which a line's `price` is the line total; read with `GET /order-xp/web/v1/pages/baskets`; removed with `POST /order-xp/v1/baskets/bulk/delete`.
 
 ### Glovo
@@ -181,29 +182,26 @@ With an account the tool prices a basket on Wolt and reads the subscription on a
 - **By phone**, and for that second step, the request carries a reCAPTCHA token, and in Georgia the phone code comes by WhatsApp. The tool has no call for either.
 - **Renewal** is `POST /oauth/refresh` with the refresh token, under the registered device's `glovo-device-urn`; the reply carries a new refresh token. The access token travels as a bare `Authorization` value.
 - `GET /customers/{id}/subscription/status` reports Prime.
+- **Seen with a real account:** an account opened with a phone number signed in through a browser window. The session was taken from the local storage named below, and `/v3/me` and the subscription status both answered it.
 - **Basket.** A guest basket was read, written (`PUT /v2/guest/customers/{id}/baskets/{basketId}` with the whole basket) and deleted on the wire; the signed-in calls drop `guest/customers/{id}` from the path. `POST /v3/checkouts/order/1/template` builds the priced checkout screen without ordering; the calls beside it without `/template` place an order.
 
 ### Bolt Food
 
-- **By phone number and texted code**, the one route its web site offers in Georgia: `POST /profile/verification/start`, then `/profile/verification/confirm`, on the same host as the catalogue. Bolt can answer the first with `REQUIRED_BOT_CHALLENGE`, a captcha demand, at which the tool stops.
-- **The lasting credential** is the returned `auth_username` with the device id used, sent as Basic to `/profile/eater/auth/authenticate` for a refresh token, which buys access tokens at `/profile/eater/auth/getAccessTokenWithRotation`.
-- **Signed-in calls** to the catalogue drop `/public` from the path, and basket calls add a `Bolt-Shard-Key` header with the city id. `POST /deliveryClient/getProviderFeeDisclosure` gives the fee estimates hidden from visitors, and `POST /deliveryClient/v2/getBasketCheckoutPreview` prices a basket, which has to exist on Bolt's side first (`v2/createBasket`, `v2/addMenuItemsToBasket`; one active basket per city).
-- `GET /subscription/webview` returns a `subscribed_icon_url` that seems to mark a Bolt Plus member.
+The tool does not sign in to Bolt Food. Its web site signs in by phone number and texted code, `POST /profile/verification/start` and then `/profile/verification/confirm`, on the same host as the catalogue. Seen with a real account: the first of those calls, made by this tool, was answered `BLOCKED_BY_FRAUD`. That is Bolt's fraud protection refusing the sign-in, and the tool takes it as final: the sign-in was removed, and nothing is done to get past the refusal. Bolt is read signed out, with its totals as lower bounds, and whether a shopper holds Bolt Plus is asked of the shopper.
 
 ### Signing in through a browser window
 
-`login wolt --browser` and `login glovo --browser` are for an account the calls above cannot sign in: a Glovo account opened with a phone number, a sign-in through Google, Apple or Facebook, a Wolt sign-in for which a captcha is wanted. The shopper signs in by hand on the platform's own page, in a browser window the tool opens on a browser profile it creates for the occasion. When the shopper has closed the browser, the tool starts it again on that profile without a window, reads the session the site left there, and deletes the profile. From then on the session is used and renewed like one made in the terminal.
+`login wolt --browser` and `login glovo --browser` are the routes that have signed a real account in, and the only ones for an account the calls above cannot sign in: a Glovo account opened with a phone number, a sign-in through Google, Apple or Facebook, a Wolt sign-in for which a captcha is wanted. The shopper signs in by hand on the platform's own page, in a browser window the tool opens on a browser profile it creates for the occasion. When the shopper has closed the browser, the tool starts it again on that profile without a window, reads the session the site left there, and deletes the profile. From then on the session is used and renewed like one made in the terminal.
 
 Two decisions shape this.
 
 - The window carries no debugging channel, and the tool learns that the sign-in is over from the browser closing. With Chrome 158 on Linux, a page in a window opened with a debugging port saw `navigator.webdriver` as true, and a page in a plain window saw it as false. A sign-in page can read that flag, and these pages run captchas.
-- The session is read from a profile of the tool's own and not from the shopper's everyday browser, so that the tool is its one holder. Renewal replaces the refresh token on each platform (Wolt's may be replaced, Glovo's reply carries a new one, Bolt's call is named for rotation), and two holders of one token would sign each other out.
+- The session is read from a profile of the tool's own and not from the shopper's everyday browser, so that the tool is its one holder. Renewal replaces the refresh token on both platforms (Wolt's may be replaced, Glovo's reply carries a new one), and two holders of one token would sign each other out.
 
 What each site keeps, read from the code of its web site:
 
 - **Wolt**: two cookies on `wolt.com`, kept for a year. `__wtoken` holds `{accessToken, expirationTime}` as JSON and `__wrtoken` the refresh token as a JSON string, each encoded as a cookie value. `mekedron/wolt-cli` takes a session from a browser it opens in the same way.
 - **Glovo**: in the local storage of `glovoapp.com`, `glovo_refresh_token` as a JSON string and `glv_device` as `{fingerprintsExpirationTime, urn}`, the registered device that a renewal names. The access token sits in the cookie `glovo_auth_info` as `{accessToken}`.
-- **Bolt Food**: its site is built on a storage layer that scrambles what it keeps, which the tool does not read. Bolt has the terminal route alone.
 
 What was measured, with Chrome 158 on Linux and a local test page standing in for a platform's:
 
@@ -221,6 +219,7 @@ The tool limits itself in the ways below. The figures are its own choice, made f
 - A host that answers `429` to every attempt of one request is left alone for ten minutes. Requests to it are refused before they are sent, in every run, with the time from which it may be asked again.
 - A request made for an account, or one that signs in, is made once and not retried. After a `429` the account is left alone for an hour, and after a `401` or `403` until the shopper signs in again; baskets are priced as a visitor's meanwhile.
 - Searches, shelves and stores are read without the account on every platform, signed in or not.
+- A run uses an account only when the shopper chose a signed-in run. The tool gathers nothing for a new run until that choice is given, and a run made signed out asks nothing in the shopper's name though sign-ins are kept.
 
 What was observed of the platforms' own throttling: Glovo answered `429` in most runs at three requests a second and in none at one a second. Wolt's store call for a delivery point answered `429` after about a dozen requests in quick succession. Some 110 requests to Wolt spread over twenty minutes met no throttle. Volume counts as well as pace: after a day of testing that asked Glovo several hundred times an hour from one connection, it answered `429` to requests a second apart, and each retry added to the count. The hourly figure and the ten minutes of rest were set after that.
 
