@@ -4,7 +4,6 @@ The shopper signs in by hand in an ordinary window, on a profile made for the oc
 """
 
 import base64
-import fcntl
 import json
 import os
 import select
@@ -20,6 +19,8 @@ PATIENCE = 30  # seconds the windowless browser is given to answer
 
 
 def find():
+    if os.name != "posix":
+        raise RuntimeError("Signing in through a browser window works on Linux and macOS only.")
     for name in NAMES:
         path = shutil.which(name)
         if path:
@@ -39,6 +40,7 @@ def windowless(profile):
     The browser takes commands on its descriptor 3 and answers on 4, each message ending in a zero byte.
     """
     binary = find()
+    import fcntl  # absent on Windows, where find() has just refused
     commands, ours_out = os.pipe()
     ours_in, answers = os.pipe()
     # Copies numbered well above 4, so that handing them to the browser as 3 and 4 cannot overwrite one with the other.

@@ -29,6 +29,11 @@ class Windowless(unittest.TestCase):
         with mock.patch.object(browser.shutil, "which", lambda name: None), self.assertRaisesRegex(RuntimeError, "needs Google Chrome or Chromium"):
             browser.find()
 
+    def test_on_windows_the_tool_still_loads_and_browser_sign_in_says_where_it_works(self):
+        self.assertNotIn("fcntl", vars(browser))  # nothing Windows lacks is needed to load the module, which every command does
+        with mock.patch.object(browser.os, "name", "nt"), self.assertRaisesRegex(RuntimeError, "works on Linux and macOS only"):
+            browser.find()
+
 
 if __name__ == "__main__":
     unittest.main()
