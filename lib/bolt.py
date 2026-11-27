@@ -111,7 +111,7 @@ def store(key, lat, lon):
 
 def _account(path, body=None, headers=None, **params):
     """One call to Bolt's account service, which answers like the rest: a code, a message and the data."""
-    reply = fetch(f"{HOST}/{path}?{urlencode(params)}&{CLIENT}", headers, body)
+    reply = fetch(f"{HOST}/{path}?{urlencode(params)}&{CLIENT}", headers, body, acting=True)
     if reply.get("code") != 0:
         raise RuntimeError(f"Bolt {path}: {reply.get('message')}")
     return reply["data"]

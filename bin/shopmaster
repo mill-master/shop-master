@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from math import floor
@@ -79,6 +80,11 @@ def save_accounts(accounts):
 
 
 def describe_account(platform, session, point):
+    resting = session.get("resting")
+    if resting and (resting["until"] is None or resting["until"] > time.time()):
+        # After a pushback the account is not asked anything, its own status included.
+        until = "you sign in again" if resting["until"] is None else datetime.fromtimestamp(resting["until"]).strftime("%H:%M")
+        return f"{platform.title()}: signed in, and left alone until {until} ({resting['why']})"
     found, error = attempt(PLATFORMS[platform].whoami, session, point["lat"], point["lon"])
     if error:
         return f"{platform.title()}: signed in, but the account could not be read ({error})"
@@ -496,6 +502,7 @@ def price_exactly(run, plan, lines, quotes):
             basket["quote_error"] = error
             continue
         basket["fees"], basket["basis"] = list(priced["fees"]), "priced"
+        basket["mine"], basket["quote_note"] = priced.get("mine"), priced.get("note")
         if priced["goods"] not in (None, basket["subtotal"]):
             # The platform charges the goods differently from the shelf prices added up: offers that depend on what else is in the basket.
             label = "Offers: " + "; ".join(priced["offers"]) if priced["offers"] else "Goods as priced by the platform"
@@ -558,12 +565,14 @@ def solve(args):
                 size = f" [{show_size(offer['size'])}]" if offer.get("size") else ""
                 print(f"      {key}: {count} × {offer['name']}{size}  {money(amounts(offer, count)[0])}")
             fees = "".join(f" + {label} {money(amount)}" if amount >= 0 else f" − {label} {money(-amount)}" for label, amount in basket["fees"])
-            mine = " for your account" if getattr(PLATFORMS[store["platform"]], "ACCOUNT", None) else ""
+            mine = " for your account" if basket.get("mine") else ""
             basis = {"priced": f"priced by {store['platform'].title()}{mine}", "planned": "planning estimate",
                      "estimated": store.get("caveat"), "partial": store.get("caveat")}[basket["basis"]]
             print(f"      goods {money(basket['subtotal'])}{fees} = {money(basket['total'])}  ({basis})")
             if basket.get("quote_error"):
                 print(f"      ! {store['platform'].title()} did not price this basket ({basket['quote_error']})")
+            if basket.get("quote_note"):
+                print(f"      ! {basket['quote_note']}")
             if basket["next_threshold"]:
                 extra, saved = basket["next_threshold"]
                 print(f"      {money(extra)} more goods here would cut the fees by {money(saved)}")

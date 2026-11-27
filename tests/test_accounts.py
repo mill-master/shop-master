@@ -49,7 +49,7 @@ def refusal(status, reply):
 
 def recording(table, calls):
     """A stand-in for fetch that notes each call and answers from `table`; an exception in the table is raised."""
-    def fetch(url, headers=None, body=None, form=None, timeout=40):
+    def fetch(url, headers=None, body=None, form=None, timeout=40, acting=False):
         calls.append((url, headers or {}, body if body is not None else form))
         for part, reply in table.items():
             if part in url:
@@ -67,14 +67,31 @@ class Wolt(unittest.TestCase):
     def test_the_e_mailed_link_is_redeemed_for_tokens(self):
         calls = []
         with mock.patch.object(wolt, "fetch", recording({"wauth2/access_token": self.TOKENS}, calls)):
-            session = wolt.sign_in(answers("https://wolt.com/en/me/magic_login?token=abc&ref=x"), lambda text: None, *POINT)
+            session = wolt.sign_in(answers("", "https://wolt.com/en/me/magic_login?token=abc&ref=x"), lambda text: None, *POINT)
         self.assertEqual((session["access_token"], session["refresh_token"]), ("access", "refresh"))
         self.assertEqual(calls[0][2], {"grant_type": "email_login", "token": "abc", "audience": "wolt-com", "capabilities": "access_confirmation"})
+
+    def test_a_texted_code_signs_in_when_wolt_asks_for_no_captcha(self):
+        calls = []
+        table = {"captcha/site_key": {"site_key": None, "operation_token": "op-1"}, "start-phone-number-authentication": {}, "wauth2/access_token": self.TOKENS}
+        with mock.patch.object(wolt, "fetch", recording(table, calls)):
+            session = wolt.sign_in(answers("+995 555 12 34 56", " 9876 "), lambda text: None, *POINT)
+        self.assertEqual(session["refresh_token"], "refresh")
+        self.assertEqual(calls[1][2], {"phone_number": "+995555123456", "message_delivery_method": "sms", "operation_token": "op-1"})
+        self.assertEqual(calls[2][2], {"grant_type": "phone_number_otp", "phone_number": "+995555123456", "otp": "9876", "tenant": "wolt",
+                                       "audience": "wolt-com", "capabilities": "access_confirmation"})
+
+    def test_a_captcha_demand_on_the_phone_route_points_to_the_e_mailed_link(self):
+        calls = []
+        with mock.patch.object(wolt, "fetch", recording({"captcha/site_key": {"site_key": "key", "operation_token": "op-1"}}, calls)):
+            with self.assertRaisesRegex(RuntimeError, "press Enter at the phone number"):
+                wolt.sign_in(answers("+995555123456"), lambda text: None, *POINT)
+        self.assertEqual(len(calls), 1)
 
     def test_a_spent_link_is_explained(self):
         with mock.patch.object(wolt, "fetch", recording({"wauth2/access_token": refusal(401, {"error_code": 126})}, [])):
             with self.assertRaisesRegex(RuntimeError, "expired or was already opened"):
-                wolt.sign_in(answers("https://wolt.com/en/me/magic_login?token=abc"), lambda text: None, *POINT)
+                wolt.sign_in(answers("", "https://wolt.com/en/me/magic_login?token=abc"), lambda text: None, *POINT)
 
     def test_a_sign_in_wolt_wants_confirmed_goes_through_the_e_mailed_code(self):
         calls = []
@@ -84,7 +101,7 @@ class Wolt(unittest.TestCase):
             "access_confirmation/email/submit": {}, "access_confirmation/email": {},
         }
         with mock.patch.object(wolt, "fetch", recording(table, calls)):
-            session = wolt.sign_in(answers("https://wolt.com/en/me/magic_login?token=abc", " 123456 "), lambda text: None, *POINT)
+            session = wolt.sign_in(answers("", "https://wolt.com/en/me/magic_login?token=abc", " 123456 "), lambda text: None, *POINT)
         self.assertEqual(session["refresh_token"], "refresh")
         self.assertEqual([call[2] for call in calls[1:3]], [{}, {"code": "123456"}])
         self.assertEqual(calls[1][1]["authorization"], "Bearer confirm-me")
@@ -102,6 +119,56 @@ class Wolt(unittest.TestCase):
         session = {"access_token": "good", "refresh_token": "r1", "expires_at": time.time() + 900}
         with mock.patch.object(wolt, "fetch", recording({}, [])):
             self.assertEqual(wolt.authorized(session)["authorization"], "Bearer good")
+
+
+class WoltAccountPricing(unittest.TestCase):
+    """The account is asked to price a finished basket and nothing else, and is left alone at the first pushback."""
+
+    STORE = {"venue_id": "v", "currency": "GEL", "country": "GEO", "offer_ids": ["everyone"], "every_offer_id": ["everyone", "members"]}
+    ROWS = {"checkout_rows": [{"template": "amount_row", "label": "Item subtotal", "amount": {"amount": 500}}]}
+    LINES = [({"id": "milk", "base": 500, "price": 500}, 1)]
+
+    def price(self, account, reply):
+        calls, kept = [], []
+        with mock.patch.object(wolt, "fetch", recording({"pages/checkout": reply}, calls)), mock.patch.object(wolt, "ACCOUNT", account), \
+                mock.patch.object(wolt, "keep", lambda: kept.append(1)):
+            return wolt.quote(self.STORE, self.LINES, *POINT), calls, kept
+
+    def account(self):
+        return {"access_token": "good", "refresh_token": "r1", "expires_at": time.time() + 900}
+
+    def test_signed_in_the_basket_is_priced_as_the_account_s_with_every_campaign_put_to_wolt(self):
+        priced, calls, _ = self.price(self.account(), self.ROWS)
+        self.assertTrue(priced["mine"])
+        self.assertEqual(calls[0][1]["authorization"], "Bearer good")
+        self.assertEqual(calls[0][2]["purchase_plan"]["use_promo_discount_ids"], ["everyone", "members"])
+
+    def test_a_throttled_account_is_rested_and_the_basket_priced_as_a_visitor_s(self):
+        account = self.account()
+        replies = iter([refusal(429, {}), self.ROWS])
+        priced, calls, kept = self.price(account, lambda body: next(replies))
+        self.assertFalse(priced["mine"])
+        self.assertIn("Wolt throttled a request made for your account", priced["note"])
+        self.assertNotIn("authorization", calls[1][1])
+        self.assertEqual(calls[1][2]["purchase_plan"]["use_promo_discount_ids"], ["everyone"])
+        self.assertAlmostEqual(account["resting"]["until"], time.time() + 3600, delta=5)
+        self.assertEqual(len(kept), 1)
+
+    def test_a_resting_account_is_not_asked_and_wakes_when_its_rest_is_over(self):
+        account = {**self.account(), "resting": {"until": time.time() + 600, "why": "Wolt throttled a request made for your account"}}
+        priced, calls, _ = self.price(account, self.ROWS)
+        self.assertEqual((priced["mine"], len(calls)), (False, 1))
+        self.assertNotIn("authorization", calls[0][1])
+        account["resting"]["until"] = time.time() - 1
+        priced, calls, _ = self.price(account, self.ROWS)
+        self.assertTrue(priced["mine"])
+        self.assertNotIn("resting", account)
+
+    def test_a_refusal_rests_the_account_until_the_next_sign_in(self):
+        account = self.account()
+        replies = iter([refusal(403, {}), self.ROWS])
+        self.price(account, lambda body: next(replies))
+        self.assertIsNone(account["resting"]["until"])
 
 
 class Glovo(unittest.TestCase):
@@ -139,9 +206,11 @@ class Glovo(unittest.TestCase):
         table = {"addresslookup": self.PLACE, "oauth/refresh": {"accessToken": fresh, "refreshToken": "r2"}}
         with mock.patch.object(glovo, "fetch", recording(table, [])), mock.patch.dict(glovo._places, clear=True), \
                 mock.patch.object(glovo, "ACCOUNT", account), mock.patch.object(glovo, "keep", lambda: kept.append(dict(account))):
-            headers = glovo._headers(*POINT, True)
+            headers = glovo._headers(*POINT, True, account=True)
+            visiting = glovo._headers(*POINT, True)
         self.assertEqual((headers["authorization"], headers["glovo-device-urn"]), (fresh, "glv:device:1"))
         self.assertEqual(kept[0]["refresh_token"], "r2")
+        self.assertNotIn("authorization", visiting)  # shelves and stores are read without the account
 
 
 class Bolt(unittest.TestCase):

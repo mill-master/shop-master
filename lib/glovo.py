@@ -47,11 +47,11 @@ _places = {}
 def place(lat, lon):
     """Glovo's own reading of the delivery point: its city and country codes and the city's name."""
     if (lat, lon) not in _places:
-        _places[lat, lon] = fetch(f"{API}/v3/addresslookup/pub/coordinates?latitude={lat}&longitude={lon}&allowFallback=true", _headers(lat, lon, account=False))
+        _places[lat, lon] = fetch(f"{API}/v3/addresslookup/pub/coordinates?latitude={lat}&longitude={lon}&allowFallback=true", _headers(lat, lon))
     return _places[lat, lon]
 
 
-def _headers(lat, lon, located=False, account=True):
+def _headers(lat, lon, located=False, account=False):
     headers = {
         **STATIC,
         "glovo-delivery-location-latitude": str(lat),
@@ -68,9 +68,10 @@ def _headers(lat, lon, located=False, account=True):
         headers["glovo-location-city-code"] = found["cityCode"]
         headers["glovo-location-country-code"] = found["countryCode"]
     if account and ACCOUNT:
+        # Only what needs the account is asked in its name; shelves and stores are read as any visitor reads them.
         # Signed in, the web client names its registered device and sends the access token bare.
         if lapses(ACCOUNT["access_token"]) - time.time() < 60:
-            renewed = fetch(f"{API}/oauth/refresh", {**headers, "glovo-device-urn": ACCOUNT["device_urn"]}, {"refreshToken": ACCOUNT["refresh_token"]})
+            renewed = fetch(f"{API}/oauth/refresh", {**headers, "glovo-device-urn": ACCOUNT["device_urn"]}, {"refreshToken": ACCOUNT["refresh_token"]}, acting=True)
             renewed = renewed.get("access", renewed)
             ACCOUNT.update(access_token=renewed["accessToken"], refresh_token=renewed["refreshToken"])
             keep()
@@ -214,17 +215,17 @@ def store(key, lat, lon):
 def sign_in(ask, tell, lat, lon):
     """Sign in with e-mail and password, the one route Glovo's web client offers that carries no captcha."""
     device = str(uuid4())
-    headers = _headers(lat, lon, True, account=False)
-    headers["glovo-device-urn"] = fetch(f"{API}/identity/v4/devices", headers, {"fingerprints": [{"provider": "CWUID", "fingerprint": device}]})["urn"]
-    email = ask("E-mail of your Glovo account: ").strip()
-    ways = [str(way) for way in fetch(f"{API}/v3/customers/auth/{urlquote(email)}/methods", headers)["data"]["authenticationMethods"]]
+    headers = _headers(lat, lon, True)
+    headers["glovo-device-urn"] = fetch(f"{API}/identity/v4/devices", headers, {"fingerprints": [{"provider": "CWUID", "fingerprint": device}]}, acting=True)["urn"]
+    email = ask("E-mail address on your Glovo account: ").strip()
+    ways = [str(way) for way in fetch(f"{API}/v3/customers/auth/{urlquote(email)}/methods", headers, acting=True)["data"]["authenticationMethods"]]
     if not ways:
-        raise RuntimeError("Glovo knows no account with that e-mail address.")
+        raise RuntimeError("Glovo knows no account with that e-mail address. An account opened with a phone number has one too: it is under Profile in the app.")
     if "PASSWORD" not in ways:
-        raise RuntimeError(f"That Glovo account signs in with {', '.join(ways)} and has no password. "
-                           "Set one with \"Forgot password\" on glovoapp.com, then sign in here again.")
+        raise RuntimeError(f"That Glovo account signs in with {', '.join(ways)} and has no password. A code sent to a phone carries a captcha this tool "
+                           "does not solve, so give the account a password once: \"Forgot password\" on glovoapp.com with this e-mail address. Then sign in here again.")
     try:
-        reply = fetch(f"{API}/oauth/token", headers, {"grantType": "password", "username": email, "password": ask("Password: ", secret=True)})
+        reply = fetch(f"{API}/oauth/token", headers, {"grantType": "password", "username": email, "password": ask("Password: ", secret=True)}, acting=True)
     except RuntimeError as refusal:
         if getattr(refusal, "status", None) == 401:
             raise RuntimeError("Glovo did not accept that password.") from refusal
@@ -237,10 +238,10 @@ def sign_in(ask, tell, lat, lon):
 
 def whoami(session, lat, lon):
     """Who is signed in, and whether they hold Glovo Prime."""
-    me = fetch(f"{API}/v3/me", _headers(lat, lon, True))
-    prime = fetch(f"{API}/customers/{me['id']}/subscription/status", _headers(lat, lon, True))
+    me = fetch(f"{API}/v3/me", _headers(lat, lon, True, account=True), acting=True)
+    prime = fetch(f"{API}/customers/{me['id']}/subscription/status", _headers(lat, lon, True, account=True), acting=True)
     return {"who": me.get("name") or me.get("email") or "your account", "member": bool(prime.get("isSubscribed")), "plan": "Glovo Prime"}
 
 
 def sign_out(session, lat, lon):
-    fetch(f"{API}/oauth/revoke", _headers(lat, lon, True, account=False), {"token": session["refresh_token"]})
+    fetch(f"{API}/oauth/revoke", _headers(lat, lon, True), {"token": session["refresh_token"]}, acting=True)

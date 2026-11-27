@@ -16,7 +16,7 @@ POINT = (41.6938, 44.8015)
 
 def answering(table):
     """A stand-in for fetch: the reply whose key occurs in the URL, called with the request body when it is a function."""
-    def fetch(url, headers=None, body=None, timeout=40):
+    def fetch(url, headers=None, body=None, form=None, timeout=40, acting=False):
         for part, reply in table.items():
             if part in url:
                 return reply(body) if callable(reply) else reply
@@ -71,7 +71,7 @@ class WoltShelf(unittest.TestCase):
 
 
 class WoltPricing(unittest.TestCase):
-    STORE = {"venue_id": "v", "currency": "GEL", "country": "GEO", "offer_ids": ["c1"]}
+    STORE = {"venue_id": "v", "currency": "GEL", "country": "GEO", "offer_ids": ["c1"], "every_offer_id": ["c1", "new-customers"]}
 
     def row(self, label, amount, original=None):
         return {"template": "amount_row", "label": label, "amount": {"amount": amount}, "original_amount": {"amount": original} if original else None}
@@ -83,7 +83,8 @@ class WoltPricing(unittest.TestCase):
         sent = {}
         with mock.patch.object(wolt, "fetch", answering({"pages/checkout": lambda body: sent.update(body) or {"checkout_rows": rows}})):
             priced = wolt.quote(self.STORE, [({"id": "franui", "base": 2450, "price": 2450}, 2)], *POINT)
-        self.assertEqual(priced, {"goods": 3430, "fees": [("Service fee", 274), ("Delivery (610 m)", 159)], "offers": ["Buy Any 2x Franui & Get 30% OFF"]})
+        self.assertEqual(priced, {"goods": 3430, "fees": [("Service fee", 274), ("Delivery (610 m)", 159)], "offers": ["Buy Any 2x Franui & Get 30% OFF"],
+                                  "mine": False, "note": None})
         plan = sent["purchase_plan"]
         self.assertEqual(plan["use_promo_discount_ids"], ["c1"])
         self.assertEqual({k: plan["menu_items"][0][k] for k in ("id", "count", "base_price", "end_amount")}, {"id": "franui", "count": 2, "base_price": 2450, "end_amount": 4900})
@@ -122,6 +123,7 @@ class WoltStore(unittest.TestCase):
             record = wolt.store("market", *POINT)
         self.assertEqual((record["name"], record["open"], record["eta"], record["distance"], record["rating"]), ("Market", True, "30-40 min", "610 m", "9.4"))
         self.assertEqual(record["offer_ids"], ["30% off shampoo", "2x Franui", "GEL10 off on orders over GEL60"])
+        self.assertEqual(record["every_offer_id"], record["offer_ids"] + ["GEL0 delivery fee"])
         self.assertEqual(sent["purchase_plan"]["use_promo_discount_ids"], record["offer_ids"])
         self.assertEqual(record["item_offers"], {"shampoo": [0.3, 1], "franui": [0.3, 2]})
         self.assertEqual([fee["label"] for fee in record["fees"]], ["Delivery", "Service fee", "Small order fee", "Bag", "Offer: GEL10 off on orders over GEL60"])

@@ -9,10 +9,10 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlencode, urlsplit
 
-# Seconds between two requests to one host. The platforms throttle bursts, and a gather sends dozens of requests.
-GAP = 0.35
-# Glovo throttles sooner than the others: at three requests a second it answered 429 in most gathers.
-SLOWER = {"api.glovoapp.com": 1.0}
+# Seconds between two requests to one host. One a second is well under what the platforms' own pages send while loading; at three a second Glovo answered 429 in most gathers.
+GAP = 1.0
+# A request made for a signed-in account keeps a wider berth, and is made once: the first pushback is taken as the answer.
+ACCOUNT_GAP = 3.0
 RETRY_ON = (429, 502, 503, 504)
 ATTEMPTS = 4
 
@@ -20,11 +20,11 @@ _next_slot = {}
 _lock = threading.Lock()
 
 
-def _wait_turn(host):
+def _wait_turn(host, gap):
     with _lock:
         now = time.monotonic()
         slot = max(now, _next_slot.get(host, 0.0))
-        _next_slot[host] = slot + SLOWER.get(host, GAP)
+        _next_slot[host] = slot + gap
     time.sleep(slot - now)
 
 
@@ -41,8 +41,10 @@ def _reply(raw):
         return raw.decode(errors="replace")[:300]
 
 
-def fetch(url, headers=None, body=None, form=None, timeout=40):
+def fetch(url, headers=None, body=None, form=None, timeout=40, acting=False):
     """GET `url`, or POST `body` as JSON or `form` as a web form when one is given. Returns the decoded JSON reply.
+
+    `acting` marks a request made for a signed-in account, or one that signs in: it is paced more widely and never repeated, so that a throttled or refused account is left alone and a code is never sent twice.
 
     A failure is raised as RuntimeError naming the host and path, with the cause chained. For a refusal it also carries the answer: `status`, and `reply` with what the host said.
     """
@@ -57,8 +59,9 @@ def fetch(url, headers=None, body=None, form=None, timeout=40):
 
     target = urlsplit(url)
     host, call = target.netloc, f"{target.netloc}{target.path}"
-    for attempt in range(ATTEMPTS):
-        _wait_turn(host)
+    attempts = 1 if acting else ATTEMPTS
+    for attempt in range(attempts):
+        _wait_turn(host, ACCOUNT_GAP if acting else GAP)
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read()
@@ -66,7 +69,7 @@ def fetch(url, headers=None, body=None, form=None, timeout=40):
                     raw = gzip.decompress(raw)
                 return json.loads(raw)
         except urllib.error.HTTPError as error:
-            if error.code not in RETRY_ON or attempt == ATTEMPTS - 1:
+            if error.code not in RETRY_ON or attempt == attempts - 1:
                 refusal = RuntimeError(f"{call} answered {error.code}")
                 answer = error.read() if error.fp else b""
                 refusal.status, refusal.reply = error.code, _reply(gzip.decompress(answer) if answer[:2] == b"\x1f\x8b" else answer)
@@ -76,7 +79,7 @@ def fetch(url, headers=None, body=None, form=None, timeout=40):
             _hold(host, float(asked) if asked.isdigit() else 4.0 * 3 ** attempt)
         except OSError as error:
             # No reply at all: a failed name lookup, a dropped connection, a timeout.
-            if attempt == ATTEMPTS - 1:
+            if attempt == attempts - 1:
                 raise RuntimeError(f"{call} could not be reached ({getattr(error, 'reason', error)})") from error
             _hold(host, 2.0 * 2 ** attempt)
 
