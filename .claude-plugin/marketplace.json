@@ -4,13 +4,13 @@
     "name": "mill-master"
   },
   "metadata": {
-    "description": "Find the cheapest way to get a whole shopping list delivered in Tbilisi. Claude prices the list on Wolt, Glovo and Bolt Food with delivery, service and small-order fees included, and names the store, or the split between two stores, that costs least. No account needed."
+    "description": "Find the cheapest way to get a whole shopping list delivered. Claude prices the list on Wolt, Glovo and Bolt Food, whichever of them deliver where you are, with delivery, service and small-order fees included, and names the store, or the split between two stores, that costs least. No account needed."
   },
   "plugins": [
     {
       "name": "shop-master",
       "source": "./",
-      "description": "Find the cheapest way to get a whole shopping list delivered in Tbilisi. Claude prices the list on Wolt, Glovo and Bolt Food with delivery, service and small-order fees included, and names the store, or the split between two stores, that costs least. No account needed."
+      "description": "Find the cheapest way to get a whole shopping list delivered. Claude prices the list on Wolt, Glovo and Bolt Food, whichever of them deliver where you are, with delivery, service and small-order fees included, and names the store, or the split between two stores, that costs least. No account needed."
     }
   ]
 }
