@@ -447,12 +447,11 @@ def _rest(session, answer):
 
 
 def whoami(session, lat, lon):
-    """Who is signed in, and whether they hold Wolt+."""
+    """Who is signed in, and whether they hold Wolt+: a subscription is held while the moment it is paid until, which Wolt gives in seconds, lies ahead."""
     user = fetch("https://restaurant-api.wolt.com/v1/user/me", authorized(session), acting=True)["user"]
     held = fetch(f"https://consumer-api.wolt.com/subscriptions-api/v1/subscriptions?current_location_country={user.get('country', '')}",
                  authorized(session), acting=True).get("subscriptions", [])
-    today = time.strftime("%Y-%m-%d")
-    plan = next((plan for plan in held if (plan.get("paid_until_date") or "")[:10] >= today), None)
+    plan = next((record for record in held if (record.get("paid_until_date") or 0) > time.time()), None)
     name = " ".join(part for part in ((user.get("name") or {}).get("first_name"), (user.get("name") or {}).get("last_name")) if part)
     return {"who": name or user.get("email") or "your account", "member": bool(plan), "plan": ((plan or {}).get("plan") or {}).get("name") or "Wolt+"}
 

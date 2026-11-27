@@ -121,6 +121,20 @@ class Wolt(unittest.TestCase):
         with mock.patch.object(wolt, "fetch", recording({}, [])):
             self.assertEqual(wolt.authorized(session)["authorization"], "Bearer good")
 
+    def test_the_account_is_read_from_replies_shaped_as_a_real_one_s(self):
+        # Shaped as a real account's replies of 2026-11-27: the dates of a subscription are moments in seconds, and an account keeps its lapsed subscriptions.
+        def subscription(paid_until):
+            return {"id": "s", "plan": {"id": "p", "country": "GEO", "currency": "GEL", "name": "Wolt+"}, "start_date": 1760000000, "end_date": None,
+                    "next_payment_date": paid_until, "paid_until_date": paid_until, "payment_cycle": "monthly", "saved_money": 4210}
+        me = {"user": {"name": {"first_name": "Nino", "last_name": "K"}, "country": "GEO", "email": "nino@example.test"}}
+        session = {"access_token": "good", "refresh_token": "r1", "expires_at": time.time() + 900}
+        for paid_until, member in ((time.time() + 86400, True), (time.time() - 86400, False)):
+            table = {"user/me": me, "subscriptions-api": {"subscriptions": [subscription(1765000000), subscription(paid_until)], "promotions": [], "partnerships": None}}
+            with self.subTest(member=member), mock.patch.object(wolt, "fetch", recording(table, [])):
+                self.assertEqual(wolt.whoami(session, *POINT), {"who": "Nino K", "member": member, "plan": "Wolt+"})
+        with mock.patch.object(wolt, "fetch", recording({"user/me": me, "subscriptions-api": {"subscriptions": [], "promotions": []}}, [])):
+            self.assertEqual(wolt.whoami(session, *POINT)["member"], False)
+
     def test_the_session_wolt_s_site_leaves_in_a_browser_is_taken_from_its_two_cookies(self):
         # As Wolt's web client writes them: each value JSON, the access token inside an object, both encoded for a cookie.
         access = token(1800)
