@@ -1,4 +1,4 @@
-"""Glovo, read through the calls its own web client makes. No login is involved.
+"""Glovo, read through the calls its own web client makes.
 
 Glovo prices a basket only for a signed-in customer. The service fee, the small-basket surcharge and a store's basket-wide offers are therefore built from the parameters it publishes with each store, and have not been checked against a priced order.
 """
@@ -8,7 +8,7 @@ import time
 from urllib.parse import quote as urlquote
 from uuid import uuid4
 
-from net import fetch
+from net import fetch, lapses
 from units import measure, money
 
 API = "https://api.glovoapp.com"
@@ -37,17 +37,21 @@ STARTED = str(int(time.time() * 1000))
 
 FOOD_CATEGORY = "1"  # Glovo's category number for restaurants
 
+# The signed-in session, when there is one, and what to call after it changes so that it is kept. Both are set by the command-line tool.
+ACCOUNT = None
+keep = lambda: None  # noqa: E731
+
 _places = {}
 
 
 def place(lat, lon):
     """Glovo's own reading of the delivery point: its city and country codes and the city's name."""
     if (lat, lon) not in _places:
-        _places[lat, lon] = fetch(f"{API}/v3/addresslookup/pub/coordinates?latitude={lat}&longitude={lon}&allowFallback=true", _headers(lat, lon))
+        _places[lat, lon] = fetch(f"{API}/v3/addresslookup/pub/coordinates?latitude={lat}&longitude={lon}&allowFallback=true", _headers(lat, lon, account=False))
     return _places[lat, lon]
 
 
-def _headers(lat, lon, located=False):
+def _headers(lat, lon, located=False, account=True):
     headers = {
         **STATIC,
         "glovo-delivery-location-latitude": str(lat),
@@ -63,6 +67,15 @@ def _headers(lat, lon, located=False):
         found = place(lat, lon)
         headers["glovo-location-city-code"] = found["cityCode"]
         headers["glovo-location-country-code"] = found["countryCode"]
+    if account and ACCOUNT:
+        # Signed in, the web client names its registered device and sends the access token bare.
+        if lapses(ACCOUNT["access_token"]) - time.time() < 60:
+            renewed = fetch(f"{API}/oauth/refresh", {**headers, "glovo-device-urn": ACCOUNT["device_urn"]}, {"refreshToken": ACCOUNT["refresh_token"]})
+            renewed = renewed.get("access", renewed)
+            ACCOUNT.update(access_token=renewed["accessToken"], refresh_token=renewed["refreshToken"])
+            keep()
+        headers["glovo-device-urn"] = ACCOUNT["device_urn"]
+        headers["authorization"] = ACCOUNT["access_token"]
     return headers
 
 
@@ -194,3 +207,40 @@ def store(key, lat, lon):
         "caveat": "fees and offers are computed from Glovo's published parameters, not priced by Glovo",
         "notes": notes,
     }
+
+
+# --- the shopper's own account ------------------------------------------------
+
+def sign_in(ask, tell, lat, lon):
+    """Sign in with e-mail and password, the one route Glovo's web client offers that carries no captcha."""
+    device = str(uuid4())
+    headers = _headers(lat, lon, True, account=False)
+    headers["glovo-device-urn"] = fetch(f"{API}/identity/v4/devices", headers, {"fingerprints": [{"provider": "CWUID", "fingerprint": device}]})["urn"]
+    email = ask("E-mail of your Glovo account: ").strip()
+    ways = [str(way) for way in fetch(f"{API}/v3/customers/auth/{urlquote(email)}/methods", headers)["data"]["authenticationMethods"]]
+    if not ways:
+        raise RuntimeError("Glovo knows no account with that e-mail address.")
+    if "PASSWORD" not in ways:
+        raise RuntimeError(f"That Glovo account signs in with {', '.join(ways)} and has no password. "
+                           "Set one with \"Forgot password\" on glovoapp.com, then sign in here again.")
+    try:
+        reply = fetch(f"{API}/oauth/token", headers, {"grantType": "password", "username": email, "password": ask("Password: ", secret=True)})
+    except RuntimeError as refusal:
+        if getattr(refusal, "status", None) == 401:
+            raise RuntimeError("Glovo did not accept that password.") from refusal
+        raise
+    if "access" not in reply:
+        raise RuntimeError("Glovo asks for a second step on this sign-in, and that step carries a captcha this tool does not solve.")
+    return {"device_id": device, "device_urn": headers["glovo-device-urn"],
+            "access_token": reply["access"]["accessToken"], "refresh_token": reply["access"]["refreshToken"]}
+
+
+def whoami(session, lat, lon):
+    """Who is signed in, and whether they hold Glovo Prime."""
+    me = fetch(f"{API}/v3/me", _headers(lat, lon, True))
+    prime = fetch(f"{API}/customers/{me['id']}/subscription/status", _headers(lat, lon, True))
+    return {"who": me.get("name") or me.get("email") or "your account", "member": bool(prime.get("isSubscribed")), "plan": "Glovo Prime"}
+
+
+def sign_out(session, lat, lon):
+    fetch(f"{API}/oauth/revoke", _headers(lat, lon, True, account=False), {"token": session["refresh_token"]})

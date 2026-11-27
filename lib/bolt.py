@@ -1,21 +1,28 @@
-"""Bolt Food, read through the calls its own web client makes. No login is involved.
+"""Bolt Food, read through the calls its own web client makes.
 
 Bolt shows an anonymous visitor a store's delivery price and nothing else: its small-order, service and packaging fees appear after sign-in. A Bolt basket total built here is a lower bound.
 """
 
+import base64
+import time
 from urllib.parse import urlencode
 from uuid import uuid4
 
-from net import fetch
+from net import fetch, lapses
 from units import measure, money
 
-API = "https://deliveryuser.live.boltsvc.net/deliveryClient/public"
+HOST = "https://deliveryuser.live.boltsvc.net"
+API = f"{HOST}/deliveryClient/public"
 CLIENT = urlencode({
     "version": "FW.1.123.0", "language": "en-US", "deviceId": str(uuid4()),
     "deviceType": "web", "device_name": "web", "device_os_version": "web",
 })
 PREVIEW_BATCH = 20  # providers per preview request, as the web client sends them
 PREVIEWED = 40      # search results looked into; Bolt ranks the relevant providers first
+
+# The signed-in session, when there is one, and what to call after it changes so that it is kept. Both are set by the command-line tool.
+ACCOUNT = None
+keep = lambda: None  # noqa: E731
 
 
 def call(method, body=None, **params):
@@ -98,3 +105,54 @@ def store(key, lat, lon):
         "partial": True,
         "notes": notes,
     }
+
+
+# --- the shopper's own account ------------------------------------------------
+
+def _account(path, body=None, headers=None, **params):
+    """One call to Bolt's account service, which answers like the rest: a code, a message and the data."""
+    reply = fetch(f"{HOST}/{path}?{urlencode(params)}&{CLIENT}", headers, body)
+    if reply.get("code") != 0:
+        raise RuntimeError(f"Bolt {path}: {reply.get('message')}")
+    return reply["data"]
+
+
+def sign_in(ask, tell, lat, lon):
+    """Sign in with the phone number and the code Bolt texts to it, the one route its web client offers in Georgia."""
+    session = {"phone_uuid": str(uuid4()), "phone": ask("Phone number of your Bolt account, with its country code (+995…): ").replace(" ", "")}
+    step = {"phone_uuid": session["phone_uuid"], "last_known_state": {}}
+    try:
+        _account("profile/verification/start", {**step, "type": "phone", "phone_number": session["phone"], "method": "sms"})
+    except RuntimeError as refusal:
+        if "REQUIRED_BOT_CHALLENGE" in str(refusal):
+            raise RuntimeError("Bolt asked for a captcha before texting the code, which this tool does not solve.") from refusal
+        raise
+    done = _account("profile/verification/confirm", {**step, "type": "phone", "phone_number": session["phone"], "code": ask("Code from Bolt's SMS: ").strip()})
+    if done["state"] == "pending_second_factor":
+        # The account has two-step verification: Bolt e-mails a second code.
+        _account("profile/verification/start", {**step, "type": "email"})
+        done = _account("profile/verification/confirm", {**step, "type": "email", "phone_number": session["phone"], "code": ask("Bolt e-mailed a second code. Code: ").strip()})
+    if done["state"] != "complete":
+        raise RuntimeError(f"Bolt left the sign-in at \"{done['state']}\": that number has no finished Bolt account, and this tool does not create one.")
+    session.update(auth_username=done["auth"]["auth_username"], refresh_token=done["auth"].get("refresh_token"), access_token=done["auth"].get("access_token"))
+    return session
+
+
+def authorized(session):
+    """The header that acts for the signed-in account, with its access token renewed when it is about to lapse."""
+    if not session.get("refresh_token"):
+        # The lasting credential is the account's name with the device id it signed in from; it buys a refresh token.
+        basic = base64.b64encode(f"{session['auth_username']}:{session['phone_uuid']}".encode()).decode()
+        session["refresh_token"] = _account("profile/eater/auth/authenticate", {}, {"authorization": f"Basic {basic}"})["refresh_token"]
+        keep()
+    if lapses(session.get("access_token") or "") - time.time() < 60:
+        renewed = _account("profile/eater/auth/getAccessTokenWithRotation", {}, {"authorization": f"Bearer {session['refresh_token']}"})
+        session.update(access_token=renewed["access_token"], refresh_token=renewed.get("refresh_token") or session["refresh_token"])
+        keep()
+    return {"authorization": f"Bearer {session['access_token']}"}
+
+
+def whoami(session, lat, lon):
+    """Who is signed in, and whether they seem to hold Bolt Plus: the client shows a badge for subscribers, and that badge is the sign read here."""
+    plus = _account("subscription/webview", None, authorized(session), delivery_lat=lat, delivery_lng=lon)
+    return {"who": session["phone"], "member": bool(plus.get("subscribed_icon_url")), "plan": "Bolt Plus"}

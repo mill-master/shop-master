@@ -1,17 +1,19 @@
-"""Wolt, read through the calls its own web client makes. No login is involved.
+"""Wolt, read through the calls its own web client makes.
 
-Wolt prices any basket for an anonymous visitor, so a store's fees are read from Wolt's own arithmetic, and a finished basket can be priced exactly, the store's standing offers included.
+Wolt prices any basket for an anonymous visitor, so a store's fees are read from Wolt's own arithmetic, and a finished basket can be priced exactly, the store's standing offers included. Signed in, the same pricing is the account's own.
 """
 
 import re
+import time
 from math import floor
-from urllib.parse import quote as urlquote
+from urllib.parse import parse_qs, quote as urlquote, urlsplit
 from uuid import uuid4
 
 from net import fetch
 from units import measure
 
 SEARCH = "https://restaurant-api.wolt.com/v1/pages/search"
+AUTH = "https://authentication.wolt.com"
 ORDER_XP = "https://consumer-api.wolt.com/order-xp/web"
 ASSORTMENT = "https://consumer-api.wolt.com/consumer-api/consumer-assortment/v1/venues/slug"
 
@@ -26,6 +28,10 @@ HEADERS = {
 }
 
 NEW_CUSTOMER = re.compile(r"new (user|customer)|first order", re.I)
+
+# The signed-in session, when there is one, and what to call after it changes so that it is kept. Both are set by the command-line tool.
+ACCOUNT = None
+keep = lambda: None  # noqa: E731
 
 
 def _half_up(amount):
@@ -129,7 +135,7 @@ def shelf(store, query, lat, lon, limit=8):
 
 def _checkout(store, items, lat, lon):
     """Wolt's pricing of a basket: the page its web client shows before payment. Nothing is ordered or stored."""
-    return fetch(f"{ORDER_XP}/v2/pages/checkout", HEADERS, {"purchase_plan": {
+    return fetch(f"{ORDER_XP}/v2/pages/checkout", _acting(), {"purchase_plan": {
         "venue": {"id": store["venue_id"], "currency": store["currency"], "country": store["country"]},
         "delivery_method": "homedelivery",
         "menu_items": [{"options": [], "restrictions": [], "exclude_from_discounts": False, "category_id": item["id"], **item} for item in items],
@@ -237,9 +243,10 @@ def schedule(minimum, price_ranges, probe):
 def store(key, lat, lon):
     """One store as it stands for this delivery point: state, fee rules, standing offers."""
     static = fetch(f"{ORDER_XP}/v1/pages/venue/slug/{urlquote(key)}/static", HEADERS)["venue"]
-    dynamic = fetch(f"{ORDER_XP}/v1/venue/slug/{urlquote(key)}/dynamic/?lat={lat}&lon={lon}", HEADERS)
+    dynamic = fetch(f"{ORDER_XP}/v1/venue/slug/{urlquote(key)}/dynamic/?lat={lat}&lon={lon}", _acting())
     venue, raw = dynamic["venue"], dynamic["venue_raw"]
-    campaigns = [campaign for campaign in raw.get("discounts", []) if not audience(campaign)]
+    # For a signed-in account Wolt itself knows which campaigns apply, so all of them are put to it.
+    campaigns = [campaign for campaign in raw.get("discounts", []) if ACCOUNT or not audience(campaign)]
     record = {
         "name": static["name"].strip(),
         "url": static["share_url"],
@@ -287,3 +294,72 @@ def store(key, lat, lon):
     if record["item_offers"]:
         record["notes"].append(f"{len(record['item_offers'])} products are under a store campaign; a candidate's price already has its discount, or says from how many units it applies")
     return record
+
+
+# --- the shopper's own account ------------------------------------------------
+
+def _acting():
+    """Request headers: the signed-in account's when there is one."""
+    return authorized(ACCOUNT) if ACCOUNT else HEADERS
+
+
+def _link_token(link):
+    """The sign-in token inside the link Wolt e-mails, which can sit a few redirects deep."""
+    for _ in range(4):
+        query = parse_qs(urlsplit(link.strip()).query)
+        if "token" in query:
+            return query["token"][0]
+        link = next((value[0] for value in query.values() if "://" in value[0]), "")
+    raise RuntimeError("That link carries no sign-in token. Copy the address of the button in Wolt's e-mail, without opening it.")
+
+
+def _session(reply):
+    return {"refresh_token": reply["refresh_token"], "access_token": reply["access_token"], "expires_at": time.time() + reply.get("expires_in", 0)}
+
+
+def sign_in(ask, tell, lat, lon):
+    """Sign in with the link Wolt e-mails. Asking Wolt to send it carries a captcha, so the shopper asks; redeeming it is a plain call."""
+    tell("Wolt signs you in with a link it e-mails. Ask for one at https://wolt.com/en/login with your e-mail address. "
+         "When the e-mail arrives, copy the address of its button without opening it (the link works once), and paste it here.")
+    grant = {"grant_type": "email_login", "token": _link_token(ask("Link from Wolt's e-mail: ")), "audience": "wolt-com", "capabilities": "access_confirmation"}
+    try:
+        return _session(fetch(f"{AUTH}/v1/wauth2/access_token", HEADERS, form=grant))
+    except RuntimeError as refusal:
+        answer = getattr(refusal, "reply", None)
+        code = answer.get("error_code") if isinstance(answer, dict) else None
+        if code == 126:
+            raise RuntimeError("Wolt did not accept that link: it has expired or was already opened. Ask for a new one.") from refusal
+        if code != 130:
+            raise
+    # Wolt wants this sign-in confirmed with a code it e-mails.
+    confirming = {**HEADERS, "authorization": f"Bearer {answer['access_confirmation_token']}"}
+    fetch(f"{AUTH}/v1/access_confirmation/email", confirming, {})
+    fetch(f"{AUTH}/v1/access_confirmation/email/submit", confirming, {"code": ask("Wolt e-mailed a confirmation code. Code: ").strip()})
+    grant = {"grant_type": "access_confirmation_token", "access_confirmation_token": answer["access_confirmation_token"], "audience": "wolt-com"}
+    return _session(fetch(f"{AUTH}/v1/wauth2/access_token", HEADERS, form=grant))
+
+
+def authorized(session):
+    """Request headers that act for the signed-in account. An access token about to lapse is renewed first, and the session kept."""
+    if session["expires_at"] - time.time() < 120:
+        reply = fetch(f"{AUTH}/v1/wauth2/access_token", HEADERS, form={"grant_type": "refresh_token", "refresh_token": session["refresh_token"]})
+        # Wolt can replace the refresh token on use, after which the old one is dead: the new one is stored before anything else happens.
+        session.update(access_token=reply["access_token"], expires_at=time.time() + reply.get("expires_in", 0),
+                       refresh_token=reply.get("refresh_token") or session["refresh_token"])
+        keep()
+    return {**HEADERS, "authorization": f"Bearer {session['access_token']}"}
+
+
+def whoami(session, lat, lon):
+    """Who is signed in, and whether they hold Wolt+."""
+    user = fetch("https://restaurant-api.wolt.com/v1/user/me", authorized(session))["user"]
+    held = fetch(f"https://consumer-api.wolt.com/subscriptions-api/v1/subscriptions?current_location_country={user.get('country', '')}",
+                 authorized(session)).get("subscriptions", [])
+    today = time.strftime("%Y-%m-%d")
+    plan = next((plan for plan in held if (plan.get("paid_until_date") or "")[:10] >= today), None)
+    name = " ".join(part for part in ((user.get("name") or {}).get("first_name"), (user.get("name") or {}).get("last_name")) if part)
+    return {"who": name or user.get("email") or "your account", "member": bool(plan), "plan": ((plan or {}).get("plan") or {}).get("name") or "Wolt+"}
+
+
+def sign_out(session, lat, lon):
+    fetch(f"{AUTH}/v1/wauth2/logout", authorized(session), {"refresh_tokens": [session["refresh_token"]]})

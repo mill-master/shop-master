@@ -1,12 +1,13 @@
 """HTTP for the platform adapters: JSON in and out, paced per host, patient when throttled or cut off."""
 
+import base64
 import gzip
 import json
 import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 # Seconds between two requests to one host. The platforms throttle bursts, and a gather sends dozens of requests.
 GAP = 0.35
@@ -33,17 +34,24 @@ def _hold(host, seconds):
         _next_slot[host] = max(_next_slot.get(host, 0.0), time.monotonic() + seconds)
 
 
-def fetch(url, headers=None, body=None, timeout=40):
-    """GET `url`, or POST `body` as JSON when one is given. Returns the decoded JSON reply.
+def _reply(raw):
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw.decode(errors="replace")[:300]
 
-    A failure is raised as RuntimeError naming the host and path, with the cause chained.
+
+def fetch(url, headers=None, body=None, form=None, timeout=40):
+    """GET `url`, or POST `body` as JSON or `form` as a web form when one is given. Returns the decoded JSON reply.
+
+    A failure is raised as RuntimeError naming the host and path, with the cause chained. For a refusal it also carries the answer: `status`, and `reply` with what the host said.
     """
-    data = None if body is None else json.dumps(body).encode()
+    data = json.dumps(body).encode() if body is not None else urlencode(form).encode() if form is not None else None
     request = urllib.request.Request(url, data=data)
     request.add_header("accept", "application/json")
     request.add_header("accept-encoding", "gzip")
     if data is not None:
-        request.add_header("content-type", "application/json")
+        request.add_header("content-type", "application/json" if body is not None else "application/x-www-form-urlencoded")
     for name, value in (headers or {}).items():
         request.add_header(name, value)
 
@@ -59,7 +67,10 @@ def fetch(url, headers=None, body=None, timeout=40):
                 return json.loads(raw)
         except urllib.error.HTTPError as error:
             if error.code not in RETRY_ON or attempt == ATTEMPTS - 1:
-                raise RuntimeError(f"{call} answered {error.code}") from error
+                refusal = RuntimeError(f"{call} answered {error.code}")
+                answer = error.read() if error.fp else b""
+                refusal.status, refusal.reply = error.code, _reply(gzip.decompress(answer) if answer[:2] == b"\x1f\x8b" else answer)
+                raise refusal from error
             asked = error.headers.get("retry-after", "")
             # A throttled host stays shut for tens of seconds; shorter waits only spend the remaining attempts.
             _hold(host, float(asked) if asked.isdigit() else 4.0 * 3 ** attempt)
@@ -68,3 +79,12 @@ def fetch(url, headers=None, body=None, timeout=40):
             if attempt == ATTEMPTS - 1:
                 raise RuntimeError(f"{call} could not be reached ({getattr(error, 'reason', error)})") from error
             _hold(host, 2.0 * 2 ** attempt)
+
+
+def lapses(token):
+    """When a signed web token stops being valid, as seconds since the epoch; 0 when it does not say."""
+    try:
+        claims = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(claims + "=" * (-len(claims) % 4))).get("exp", 0)
+    except (IndexError, ValueError):
+        return 0

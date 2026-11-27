@@ -56,7 +56,8 @@ For that reason the best plan made only of fully known fees is always shown besi
 ## What it does not do
 
 - It does not order, pay, or fill a cart. You check out in the app.
-- It does not know your account. New-customer offers and subscriber prices are listed where a platform advertises them and left out of the totals. With Wolt+, Glovo Prime or Bolt Plus you pay less on that platform than shown, by up to the delivery fee and most of the service fee; Claude will say which way that tilts a close comparison, and cannot compute it without a signed-in session, which is not built.
+- Without your account it cannot know your prices. New-customer offers and subscriber prices are listed where a platform advertises them and left out of the totals. With Wolt+, Glovo Prime or Bolt Plus you pay less on that platform than shown, by up to the delivery fee and most of the service fee, and Claude will say which way that tilts a close comparison.
+- Signing in is new. `bin/shopmaster login wolt`, `login glovo` and `login bolt` keep a token on your computer, in a file only you can read. On Wolt the pricing then becomes your account's own, Wolt+ and personal offers included; on Glovo and Bolt it reads your subscription and no more yet.
 - It was built and tested in Tbilisi. Other cities where these platforms operate are untried.
 
 ## The platforms' terms

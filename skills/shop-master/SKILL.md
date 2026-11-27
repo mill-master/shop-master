@@ -13,7 +13,7 @@ The cheapest shelf price therefore says little. What the shopper needs is the st
 
 ## The tool
 
-`shopmaster` does the collecting and the arithmetic. It reads the three platforms the way their web sites do, without an account. It does not order, pay, or touch a cart: the shopper checks out in the app, from the links it prints. Run it as `python3 "${CLAUDE_PLUGIN_ROOT}/bin/shopmaster"` (`python` on Windows); the lines below write `shopmaster` for that, and `--help` on it and on each command gives the full syntax. One run goes:
+`shopmaster` does the collecting and the arithmetic. It reads the three platforms the way their web sites do, with or without the shopper's account. It does not order, pay, or touch a cart: the shopper checks out in the app, from the links it prints. Run it as `python3 "${CLAUDE_PLUGIN_ROOT}/bin/shopmaster"` (`python` on Windows); the lines below write `shopmaster` for that, and `--help` on it and on each command gives the full syntax. One run goes:
 
 ```
 shopmaster where                      # the saved delivery point
@@ -69,6 +69,16 @@ The totals are those of a customer with none of these. A shopper who holds one p
 `caveat:` and `!` lines are the tool telling you what it could not establish. A failed lookup or store read means unknown, not absent, so settle it before answering: run `gather --add`, which tries again whatever failed, until those lines are gone. Report a gap to the shopper only when it survives that, with its reason.
 
 A closed store is passed over for the next in the ranking, and left out of `solve`, unless `--closed` is given, which suits an order planned for later.
+
+## The shopper's own account
+
+`shopmaster account` shows where the shopper is signed in and whether a subscription shows there. Signing in is theirs to do, in their own terminal, because it takes a password or a code that should not pass through this conversation:
+
+- `shopmaster login wolt`: they ask Wolt for a sign-in e-mail at wolt.com and paste the link from it.
+- `shopmaster login glovo`: e-mail and password. An account that signs in with Google or a phone code needs a password set first.
+- `shopmaster login bolt`: phone number, then the code Bolt texts.
+
+The token stays in a file only they can read, and `logout` removes it. Signed in to Wolt, the pricing is the account's own: Wolt+ and personal offers are in the totals, and the basket line says "priced by Wolt for your account". On Glovo the account travels with each request, and on Bolt only the subscription is read; totals there stay as described above. These sign-in routes follow the platforms' web clients and are new, so when one stops, pass the shopper the tool's message as it stands.
 
 ## Dishes
 
